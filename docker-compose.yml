@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: baomian
+      POSTGRES_USER: baomian
+      POSTGRES_PASSWORD: baomian
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baomian -d baomian"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - baomian_postgres:/var/lib/postgresql/data
+
+  migrate:
+    build: .
+    entrypoint: ["/app/migrate"]
+    command: ["up"]
+    environment:
+      DATABASE_URL: postgres://baomian:baomian@postgres:5432/baomian?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    environment:
+      HTTP_ADDR: :8080
+      DATABASE_URL: postgres://baomian:baomian@postgres:5432/baomian?sslmode=disable
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-8}
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  baomian_postgres:

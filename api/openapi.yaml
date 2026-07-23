@@ -1,0 +1,414 @@
+openapi: 3.1.0
+info:
+  title: 抱眠 MVP Backend API
+  version: 0.1.0
+  description: |
+    抱眠 P0 APP、AI 与 T5 设备网关契约。P0 不包含正式登录；除设备接口外，
+    通过 X-Demo-User-Id 选择演示用户，缺省为 expo-user-001。
+servers:
+  - url: https://bm.lg.gl/api/v1
+    description: 线上环境
+  - url: http://localhost:8325/api/v1
+    description: 本地开发环境
+security:
+  - DemoUser: []
+tags:
+  - name: System
+  - name: Profile
+  - name: Tonight
+  - name: Conversation
+  - name: Journal
+  - name: Device
+  - name: Realtime
+paths:
+  /health:
+    get:
+      tags: [System]
+      security: []
+      summary: 服务和数据库健康检查
+      responses:
+        "200":
+          description: 健康
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Health"}
+        "503":
+          description: 数据库不可用
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Health"}
+  /profile:
+    get:
+      tags: [Profile]
+      summary: 获取或初始化用户设置
+      responses:
+        "200":
+          description: 用户设置
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Profile"}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Profile]
+      summary: 更新用户设置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Profile"}
+      responses:
+        "200":
+          description: 更新后的用户设置
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Profile"}
+        default: {$ref: "#/components/responses/Error"}
+  /tonight:
+    get:
+      tags: [Tonight]
+      summary: 获取今晚状态
+      responses:
+        "200":
+          description: 今晚状态
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TonightState"}
+        default: {$ref: "#/components/responses/Error"}
+  /tonight/actions:
+    post:
+      tags: [Tonight]
+      summary: 执行 APP 演示动作
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TonightActionRequest"}
+      responses:
+        "200":
+          description: 更新后的今晚状态
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TonightState"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /conversations/turn:
+    post:
+      tags: [Conversation]
+      summary: 提交一轮睡前倾诉
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ConversationTurnRequest"}
+      responses:
+        "200":
+          description: AI 回复与今晚状态
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ConversationTurnResponse"}
+        "409": {$ref: "#/components/responses/Error"}
+        "502": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /conversations/finalize:
+    post:
+      tags: [Conversation]
+      summary: 提前结束倾诉并生成/更新记忆卡
+      responses:
+        "200":
+          description: 记忆卡与今晚状态
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FinalizeResponse"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /journals:
+    get:
+      tags: [Journal]
+      summary: 获取最近记忆卡
+      parameters:
+        - {$ref: "#/components/parameters/Limit"}
+      responses:
+        "200":
+          description: 记忆卡列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/MemoryCard"}
+        default: {$ref: "#/components/responses/Error"}
+  /memories:
+    get:
+      tags: [Journal]
+      summary: 获取最近记忆卡（journals 别名）
+      parameters:
+        - {$ref: "#/components/parameters/Limit"}
+      responses:
+        "200":
+          description: 记忆卡列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/MemoryCard"}
+        default: {$ref: "#/components/responses/Error"}
+  /ws:
+    get:
+      tags: [Realtime]
+      summary: 建立按用户广播的 WebSocket
+      description: 返回 tonight.updated、device.event、conversation.reply、journal.created 事件。
+      parameters:
+        - name: userId
+          in: query
+          schema: {type: string, default: expo-user-001}
+      responses:
+        "101": {description: WebSocket 升级成功}
+  /device/events:
+    post:
+      tags: [Device]
+      security: []
+      summary: 上报 T5 设备事件
+      description: eventId 全局幂等；重复上报返回首次处理结果并标记 duplicate=true。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DeviceEventRequest"}
+      responses:
+        "200":
+          description: 处理后的状态和新建命令
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeviceEventResponse"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /device/commands/next:
+    get:
+      tags: [Device]
+      security: []
+      summary: 长轮询领取下一条设备命令
+      parameters:
+        - name: deviceId
+          in: query
+          required: true
+          schema: {type: string}
+        - name: timeoutSec
+          in: query
+          schema: {type: integer, minimum: 0, maximum: 30, default: 20}
+      responses:
+        "200":
+          description: 命令已领取并标记 dispatched
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Command"}
+        "204": {description: 超时前没有待领取命令}
+        default: {$ref: "#/components/responses/Error"}
+  /device/commands/ack:
+    post:
+      tags: [Device]
+      security: []
+      summary: ACK 设备命令
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CommandAckRequest"}
+      responses:
+        "200":
+          description: 更新后的命令
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Command"}
+        "404": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    DemoUser:
+      type: apiKey
+      in: header
+      name: X-Demo-User-Id
+      description: P0 演示身份；省略时使用 expo-user-001。
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 30, default: 7}
+  responses:
+    Error:
+      description: 统一错误响应
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorEnvelope"}
+  schemas:
+    Health:
+      type: object
+      required: [status, database]
+      properties:
+        status: {type: string, enum: [ok, unhealthy]}
+        database: {type: string, enum: [ok, unavailable]}
+    Profile:
+      type: object
+      additionalProperties: false
+      required: [bedtime, wakeTime, persona, reminderStyle, defaultGuidance, whiteNoiseDurationMin]
+      properties:
+        bedtime: {type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", example: "23:00"}
+        wakeTime: {type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", example: "07:00"}
+        persona: {type: string, enum: [gentle, rational, firm]}
+        reminderStyle: {type: string, enum: [gentle, firm]}
+        defaultGuidance: {$ref: "#/components/schemas/Guidance"}
+        whiteNoiseDurationMin: {type: integer, enum: [10, 20, 30]}
+    Guidance:
+      type: string
+      enum: [rain, brown_noise, breathing_46, silence]
+    Phase:
+      type: string
+      enum: [WAITING_TO_LOCK, LOCKED, CONVERSATION, CHOOSING_GUIDANCE, SLEEPING, SUNRISE, AWAKE, PHONE_REMOVED]
+    TonightState:
+      type: object
+      required: [id, date, phase, bedtime, wakeTime, conversationTurns, audioPlaying, pausedForTonight, device, sunrise]
+      properties:
+        id: {type: string, format: uuid}
+        date: {type: string, format: date}
+        phase: {$ref: "#/components/schemas/Phase"}
+        bedtime: {type: string}
+        wakeTime: {type: string}
+        conversationTurns: {type: integer, minimum: 0, maximum: 3}
+        selectedGuidance: {$ref: "#/components/schemas/Guidance"}
+        audioPlaying: {type: boolean}
+        pausedForTonight: {type: boolean}
+        device:
+          type: object
+          required: [boxClosed]
+          properties:
+            boxClosed: {type: boolean}
+        sunrise:
+          type: object
+          required: [progress]
+          properties:
+            progress: {type: integer, minimum: 0, maximum: 100}
+        latestAIDraft:
+          type: object
+          additionalProperties: true
+    TonightActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [simulate_box_closed, simulate_box_opened, start_conversation, select_guidance, stop_audio, simulate_alarm, snooze, mark_awake]
+        guidance: {$ref: "#/components/schemas/Guidance"}
+        payload: {type: object, additionalProperties: true}
+    ConversationTurnRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text: {type: string}
+        inputMode: {type: string, enum: [text, voice], default: text}
+    AIResult:
+      type: object
+      additionalProperties: false
+      required: [reply, emotion, worry, tomorrowTask, comfort, guidanceOptions, suggestedGuidance, shouldFinalize, fallback]
+      properties:
+        reply: {type: string}
+        emotion: {type: string}
+        worry: {type: string}
+        tomorrowTask: {type: string}
+        comfort: {type: string}
+        guidanceOptions:
+          type: array
+          prefixItems:
+            - {const: rain}
+            - {const: brown_noise}
+            - {const: breathing_46}
+            - {const: silence}
+          minItems: 4
+          maxItems: 4
+        suggestedGuidance: {$ref: "#/components/schemas/Guidance"}
+        shouldFinalize: {type: boolean}
+        fallback: {type: boolean}
+        highRisk: {type: boolean, default: false}
+    ConversationTurnResponse:
+      type: object
+      required: [result, tonight]
+      properties:
+        result: {$ref: "#/components/schemas/AIResult"}
+        tonight: {$ref: "#/components/schemas/TonightState"}
+        journal: {$ref: "#/components/schemas/MemoryCard"}
+    MemoryCard:
+      type: object
+      required: [id, date, emotion, worry, tomorrowTask, comfort, suggestedGuidance, fallback, createdAt]
+      properties:
+        id: {type: string, format: uuid}
+        date: {type: string, format: date}
+        emotion: {type: string}
+        worry: {type: string}
+        tomorrowTask: {type: string}
+        comfort: {type: string}
+        suggestedGuidance: {$ref: "#/components/schemas/Guidance"}
+        fallback: {type: boolean}
+        createdAt: {type: string, format: date-time}
+    FinalizeResponse:
+      type: object
+      required: [journal, tonight]
+      properties:
+        journal: {$ref: "#/components/schemas/MemoryCard"}
+        tonight: {$ref: "#/components/schemas/TonightState"}
+    DeviceEventRequest:
+      type: object
+      additionalProperties: false
+      required: [eventId, deviceId, type]
+      properties:
+        eventId: {type: string}
+        deviceId: {type: string}
+        userId: {type: string, default: expo-user-001}
+        type:
+          type: string
+          enum: [box_closed, box_opened, soft_button/short_press, soft_button/long_press, alarm_start]
+        payload: {type: object, additionalProperties: true}
+        occurredAt: {type: string, format: date-time}
+    DeviceEventResponse:
+      type: object
+      required: [duplicate, tonight, commands]
+      properties:
+        duplicate: {type: boolean}
+        tonight: {$ref: "#/components/schemas/TonightState"}
+        commands:
+          type: array
+          items: {$ref: "#/components/schemas/Command"}
+    Command:
+      type: object
+      required: [id, deviceId, type, payload, status, createdAt]
+      properties:
+        id: {type: string, format: uuid}
+        deviceId: {type: string}
+        type: {type: string}
+        payload: {type: object, additionalProperties: true}
+        status: {type: string, enum: [pending, dispatched, acked, failed]}
+        createdAt: {type: string, format: date-time}
+    CommandAckRequest:
+      type: object
+      additionalProperties: false
+      required: [deviceId, commandId, success]
+      properties:
+        deviceId: {type: string}
+        commandId: {type: string, format: uuid}
+        success: {type: boolean}
+        payload: {type: object, additionalProperties: true}
+    WSEvent:
+      type: object
+      required: [type, occurredAt, data]
+      properties:
+        type: {type: string, enum: [tonight.updated, device.event, conversation.reply, journal.created, error]}
+        occurredAt: {type: string, format: date-time}
+        data: {}
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string}
+            message: {type: string}
+            details: {type: object, additionalProperties: true}

@@ -1,0 +1,103 @@
+@baseUrl = http://localhost:8325
+@userId = expo-user-001
+@deviceId = expo-device-001
+
+### 健康检查
+GET {{baseUrl}}/api/v1/health
+
+### 获取默认设置
+GET {{baseUrl}}/api/v1/profile
+X-Demo-User-Id: {{userId}}
+
+### 更新设置
+PUT {{baseUrl}}/api/v1/profile
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{
+  "bedtime": "23:00",
+  "wakeTime": "07:00",
+  "persona": "gentle",
+  "reminderStyle": "gentle",
+  "defaultGuidance": "breathing_46",
+  "whiteNoiseDurationMin": 20
+}
+
+### 获取今晚状态
+GET {{baseUrl}}/api/v1/tonight
+X-Demo-User-Id: {{userId}}
+
+### 模拟闭仓
+POST {{baseUrl}}/api/v1/tonight/actions
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{"action":"simulate_box_closed"}
+
+### 开始倾诉（可省略；首轮 turn 会从 LOCKED 自动进入 CONVERSATION）
+POST {{baseUrl}}/api/v1/tonight/actions
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{"action":"start_conversation"}
+
+### 第一轮倾诉
+POST {{baseUrl}}/api/v1/conversations/turn
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{"text":"明天要做工作汇报，我有点紧张。","inputMode":"text"}
+
+### 提前结束倾诉
+POST {{baseUrl}}/api/v1/conversations/finalize
+X-Demo-User-Id: {{userId}}
+
+### 选择引导
+POST {{baseUrl}}/api/v1/tonight/actions
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{"action":"select_guidance","guidance":"breathing_46"}
+
+### 获取最近 7 张记忆卡
+GET {{baseUrl}}/api/v1/journals?limit=7
+X-Demo-User-Id: {{userId}}
+
+### 上报设备开仓事件
+POST {{baseUrl}}/api/v1/device/events
+Content-Type: application/json
+
+{
+  "eventId": "{{$uuid}}",
+  "deviceId": "{{deviceId}}",
+  "userId": "{{userId}}",
+  "type": "box_opened",
+  "payload": {}
+}
+
+### 领取设备命令（没有命令时 204）
+GET {{baseUrl}}/api/v1/device/commands/next?deviceId={{deviceId}}&timeoutSec=1
+
+### 模拟晨光开始
+POST {{baseUrl}}/api/v1/tonight/actions
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{"action":"simulate_alarm"}
+
+### 模拟贪睡
+POST {{baseUrl}}/api/v1/tonight/actions
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{"action":"snooze"}
+
+### 标记起床
+POST {{baseUrl}}/api/v1/tonight/actions
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{"action":"mark_awake"}
+
+### WebSocket（使用支持 WebSocket 的 HTTP 客户端）
+WS {{baseUrl}}/api/v1/ws?userId={{userId}}
