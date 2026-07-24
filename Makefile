@@ -1,4 +1,4 @@
-.PHONY: tidy fmt test race migrate-up migrate-down run compose-up compose-down smoke backup restore
+.PHONY: tidy fmt test race migrate-up migrate-down run restart compose-up compose-down smoke backup restore
 
 tidy:
 	go mod tidy
@@ -20,6 +20,9 @@ migrate-down:
 
 run:
 	go run ./cmd/server
+
+restart:
+	./scripts/restart-from-source.sh
 
 compose-up:
 	docker compose up --build -d
