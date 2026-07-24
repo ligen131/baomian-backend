@@ -39,14 +39,17 @@ func (s *Store) GetOrCreateProfile(ctx context.Context, userID string) (*model.P
 	}
 
 	profile = model.Profile{
-		ID:                    uuid.New(),
-		UserID:                userID,
-		Bedtime:               "23:00",
-		WakeTime:              "07:30",
-		Persona:               "gentle",
-		ReminderStyle:         "gentle",
-		DefaultGuidance:       "rain",
-		WhiteNoiseDurationMin: 20,
+		ID:                     uuid.New(),
+		UserID:                 userID,
+		Bedtime:                "23:00",
+		WakeTime:               "07:30",
+		Persona:                "gentle",
+		ReminderStyle:          "gentle",
+		DefaultGuidance:        "rain",
+		WhiteNoiseDurationMin:  20,
+		TimeZone:               "Asia/Shanghai",
+		BedtimeReminderEnabled: true,
+		WakeAlarmEnabled:       true,
 	}
 	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&profile).Error; err != nil {
 		return nil, fmt.Errorf("create profile: %w", err)
@@ -135,6 +138,25 @@ func (s *Store) GetLatestUserTurn(ctx context.Context, sessionID uuid.UUID) (*mo
 	return &turn, nil
 }
 
+func (s *Store) GetConversationTurnByClientRequestID(ctx context.Context, sessionID uuid.UUID, clientRequestID, role string) (*model.ConversationTurn, error) {
+	var turn model.ConversationTurn
+	err := s.db.WithContext(ctx).Where("session_id = ? AND client_request_id = ? AND role = ?", sessionID, clientRequestID, role).First(&turn).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, repository.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get conversation turn by client request id: %w", err)
+	}
+	return &turn, nil
+}
+
+func (s *Store) DeleteConversationTurns(ctx context.Context, sessionID uuid.UUID) error {
+	if err := s.db.WithContext(ctx).Where("session_id = ?", sessionID).Delete(&model.ConversationTurn{}).Error; err != nil {
+		return fmt.Errorf("delete conversation turns: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) UpsertMemoryCard(ctx context.Context, card *model.MemoryCard) error {
 	if card.ID == uuid.Nil {
 		card.ID = uuid.New()
@@ -155,6 +177,64 @@ func (s *Store) ListMemoryCards(ctx context.Context, userID string, limit int) (
 		return nil, fmt.Errorf("list memory cards: %w", err)
 	}
 	return cards, nil
+}
+
+func (s *Store) GetMemoryCard(ctx context.Context, userID string, cardID uuid.UUID, forUpdate bool) (*model.MemoryCard, error) {
+	query := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", cardID, userID)
+	if forUpdate {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var card model.MemoryCard
+	if err := query.First(&card).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, repository.ErrNotFound
+		}
+		return nil, fmt.Errorf("get memory card: %w", err)
+	}
+	return &card, nil
+}
+
+func (s *Store) UpdateMemoryCard(ctx context.Context, card *model.MemoryCard) error {
+	if err := s.db.WithContext(ctx).Save(card).Error; err != nil {
+		return fmt.Errorf("update memory card: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteMemoryCard(ctx context.Context, userID string, cardID uuid.UUID) error {
+	result := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", cardID, userID).Delete(&model.MemoryCard{})
+	if result.Error != nil {
+		return fmt.Errorf("delete memory card: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) GetNightSessionByID(ctx context.Context, sessionID uuid.UUID, forUpdate bool) (*model.NightSession, error) {
+	query := s.db.WithContext(ctx).Where("id = ?", sessionID)
+	if forUpdate {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var session model.NightSession
+	if err := query.First(&session).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, repository.ErrNotFound
+		}
+		return nil, fmt.Errorf("get night session by id: %w", err)
+	}
+	return &session, nil
+}
+
+func (s *Store) ListDueNightSessionIDs(ctx context.Context, now time.Time, limit int) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	due := `(phase = 'CONVERSATION' AND (conversation_silence_deadline_at <= ? OR conversation_hard_deadline_at <= ?) AND (conversation_processing_until IS NULL OR conversation_processing_until <= ?)) OR (phase = 'PHONE_REMOVED' AND resume_deadline_at <= ?) OR (audio_playing = TRUE AND audio_ends_at <= ?)`
+	if err := s.db.WithContext(ctx).Model(&model.NightSession{}).Where(due, now, now, now, now, now).
+		Order("updated_at ASC").Limit(limit).Pluck("id", &ids).Error; err != nil {
+		return nil, fmt.Errorf("list due night sessions: %w", err)
+	}
+	return ids, nil
 }
 
 func (s *Store) GetDeviceEventByEventID(ctx context.Context, eventID string) (*model.DeviceEvent, error) {
@@ -202,17 +282,25 @@ func (s *Store) CreateDeviceCommands(ctx context.Context, commands []model.Devic
 	return nil
 }
 
-func (s *Store) TakeNextDeviceCommand(ctx context.Context, deviceID string) (*model.DeviceCommand, error) {
+func (s *Store) TakeNextDeviceCommand(ctx context.Context, deviceID string, lease time.Duration, maxAttempts int) (*model.DeviceCommand, error) {
 	var command model.DeviceCommand
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		now := time.Now().UTC()
+		if err := tx.Model(&model.DeviceCommand{}).
+			Where("device_id = ? AND status = ? AND lease_expires_at <= ? AND dispatch_attempts >= ?", deviceID, "dispatched", now, maxAttempts).
+			Updates(map[string]any{"status": "failed", "lease_expires_at": nil}).Error; err != nil {
+			return err
+		}
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("device_id = ? AND status = ?", deviceID, "pending").
+			Where("device_id = ? AND dispatch_attempts < ? AND (status = ? OR (status = ? AND lease_expires_at <= ?))", deviceID, maxAttempts, "pending", "dispatched", now).
 			Order("created_at ASC").First(&command).Error; err != nil {
 			return err
 		}
-		now := time.Now().UTC()
+		leaseExpiresAt := now.Add(lease)
 		command.Status = "dispatched"
 		command.DispatchedAt = &now
+		command.DispatchAttempts++
+		command.LeaseExpiresAt = &leaseExpiresAt
 		return tx.Save(&command).Error
 	})
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -222,6 +310,34 @@ func (s *Store) TakeNextDeviceCommand(ctx context.Context, deviceID string) (*mo
 		return nil, fmt.Errorf("take device command: %w", err)
 	}
 	return &command, nil
+}
+
+func (s *Store) UpsertDevice(ctx context.Context, device *model.Device) error {
+	if len(device.Capabilities) == 0 {
+		device.Capabilities = datatypes.JSON([]byte("{}"))
+	}
+	if len(device.Status) == 0 {
+		device.Status = datatypes.JSON([]byte("{}"))
+	}
+	columns := []string{"user_id", "firmware_version", "capabilities", "status", "local_time", "last_seen_at", "updated_at"}
+	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "device_id"}},
+		DoUpdates: clause.AssignmentColumns(columns),
+	}).Create(device).Error; err != nil {
+		return fmt.Errorf("upsert device: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetDevice(ctx context.Context, userID, deviceID string) (*model.Device, error) {
+	var device model.Device
+	if err := s.db.WithContext(ctx).Where("device_id = ? AND user_id = ?", deviceID, userID).First(&device).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, repository.ErrNotFound
+		}
+		return nil, fmt.Errorf("get device: %w", err)
+	}
+	return &device, nil
 }
 
 func (s *Store) AckDeviceCommand(ctx context.Context, deviceID string, commandID uuid.UUID, success bool, payload []byte) (*model.DeviceCommand, error) {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/baomian/baomian-backend/internal/dto"
+	"github.com/baomian/baomian-backend/internal/middleware"
 	"github.com/baomian/baomian-backend/internal/repository"
 	"github.com/baomian/baomian-backend/internal/service"
 	"github.com/gin-gonic/gin"
@@ -28,6 +29,29 @@ func (h *DeviceController) Event(c *gin.Context) {
 		return
 	}
 	result, err := h.service.HandleEvent(c.Request.Context(), request)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *DeviceController) Heartbeat(c *gin.Context) {
+	var request dto.DeviceHeartbeatRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		respondBindingError(c, err)
+		return
+	}
+	result, err := h.service.Heartbeat(c.Request.Context(), request)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *DeviceController) Status(c *gin.Context) {
+	result, err := h.service.Status(c.Request.Context(), middleware.UserID(c), c.Param("deviceId"))
 	if err != nil {
 		respondError(c, err)
 		return

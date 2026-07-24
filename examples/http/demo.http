@@ -1,31 +1,44 @@
 @baseUrl = http://localhost:8325
 @userId = expo-user-001
 @deviceId = expo-device-001
+@journalId = 替换为晚安卡 UUID
 
 ### 健康检查
 GET {{baseUrl}}/api/v1/health
 
-### 获取默认设置
+### Prometheus 指标（不在 /api/v1 下）
+GET {{baseUrl}}/metrics
+
+### 获取设置
 GET {{baseUrl}}/api/v1/profile
 X-Demo-User-Id: {{userId}}
 
-### 更新设置
+### 部分更新设置；提醒由 Android 本地调度
 PUT {{baseUrl}}/api/v1/profile
 Content-Type: application/json
 X-Demo-User-Id: {{userId}}
 
 {
   "bedtime": "23:00",
-  "wakeTime": "07:00",
+  "wakeTime": "07:30",
   "persona": "gentle",
-  "reminderStyle": "gentle",
   "defaultGuidance": "breathing_46",
-  "whiteNoiseDurationMin": 20
+  "whiteNoiseDurationMin": 20,
+  "timeZone": "Asia/Shanghai",
+  "bedtimeReminderEnabled": true,
+  "wakeAlarmEnabled": true
 }
 
 ### 获取今晚状态
 GET {{baseUrl}}/api/v1/tonight
 X-Demo-User-Id: {{userId}}
+
+### 仅跳过今晚提醒
+POST {{baseUrl}}/api/v1/tonight/actions
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{"action":"skip_tonight_reminders"}
 
 ### 模拟闭仓
 POST {{baseUrl}}/api/v1/tonight/actions
@@ -34,70 +47,92 @@ X-Demo-User-Id: {{userId}}
 
 {"action":"simulate_box_closed"}
 
-### 开始倾诉（可省略；首轮 turn 会从 LOCKED 自动进入 CONVERSATION）
+### 开始倾诉
 POST {{baseUrl}}/api/v1/tonight/actions
 Content-Type: application/json
 X-Demo-User-Id: {{userId}}
 
 {"action":"start_conversation"}
 
-### 第一轮倾诉
+### 上报正在说话，延长静默截止
+POST {{baseUrl}}/api/v1/conversations/activity
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{"activity":"speaking"}
+
+### Debug 文字倾诉；正式产品语音由 T5 Voice WebSocket 完成
+# clientRequestId 重试时保持不变。HTTP 示例不演示 binary PCM WebSocket，
+# 设备协议见 docs/hardware-integration.md 和 docs/voice-streaming-design.md。
 POST {{baseUrl}}/api/v1/conversations/turn
 Content-Type: application/json
 X-Demo-User-Id: {{userId}}
 
-{"text":"明天要做工作汇报，我有点紧张。","inputMode":"text"}
+{"text":"明天要做工作汇报，我有点紧张。","inputMode":"text","clientRequestId":"{{$uuid}}"}
+
+### APP 重启后恢复完整对话
+GET {{baseUrl}}/api/v1/conversations/tonight
+X-Demo-User-Id: {{userId}}
 
 ### 提前结束倾诉
 POST {{baseUrl}}/api/v1/conversations/finalize
 X-Demo-User-Id: {{userId}}
 
-### 选择引导
+### 选择白噪音；命令包含 Profile 配置的 durationMinutes
 POST {{baseUrl}}/api/v1/tonight/actions
 Content-Type: application/json
 X-Demo-User-Id: {{userId}}
 
-{"action":"select_guidance","guidance":"breathing_46"}
+{"action":"select_guidance","guidance":"rain"}
 
-### 获取最近 7 张记忆卡
+### 最近 7 张晚安卡
 GET {{baseUrl}}/api/v1/journals?limit=7
 X-Demo-User-Id: {{userId}}
 
-### 上报设备开仓事件
-POST {{baseUrl}}/api/v1/device/events
+### 单卡详情
+GET {{baseUrl}}/api/v1/journals/{{journalId}}
+X-Demo-User-Id: {{userId}}
+
+### 完成明日待办
+PATCH {{baseUrl}}/api/v1/journals/{{journalId}}
+Content-Type: application/json
+X-Demo-User-Id: {{userId}}
+
+{"tomorrowTaskCompleted":true}
+
+### 删除历史单卡及对应当晚对话；进行中的今晚返回 409
+DELETE {{baseUrl}}/api/v1/journals/{{journalId}}
+X-Demo-User-Id: {{userId}}
+
+### 设备 heartbeat
+POST {{baseUrl}}/api/v1/device/heartbeat
 Content-Type: application/json
 
 {
-  "eventId": "{{$uuid}}",
-  "deviceId": "{{deviceId}}",
-  "userId": "{{userId}}",
-  "type": "box_opened",
-  "payload": {}
+  "deviceId":"{{deviceId}}",
+  "userId":"{{userId}}",
+  "firmwareVersion":"1.1.0",
+  "capabilities":{"voiceWebSocket":true,"pcm24000Mono":true,"sunrise":true,"builtInGuidance":["rain","brown_noise"]},
+  "status":{"boxClosed":true}
 }
 
-### 领取设备命令（没有命令时 204）
+### APP 查询设备状态
+GET {{baseUrl}}/api/v1/devices/{{deviceId}}/status
+X-Demo-User-Id: {{userId}}
+
+### 设备事件
+POST {{baseUrl}}/api/v1/device/events
+Content-Type: application/json
+
+{"eventId":"{{$uuid}}","deviceId":"{{deviceId}}","userId":"{{userId}}","type":"box_opened","payload":{}}
+
+### 领取设备命令；关注 attempt 与 leaseExpiresAt，并按 id 去重
 GET {{baseUrl}}/api/v1/device/commands/next?deviceId={{deviceId}}&timeoutSec=1
 
-### 模拟晨光开始
-POST {{baseUrl}}/api/v1/tonight/actions
-Content-Type: application/json
-X-Demo-User-Id: {{userId}}
-
-{"action":"simulate_alarm"}
-
-### 模拟贪睡
-POST {{baseUrl}}/api/v1/tonight/actions
-Content-Type: application/json
-X-Demo-User-Id: {{userId}}
-
-{"action":"snooze"}
-
-### 标记起床
-POST {{baseUrl}}/api/v1/tonight/actions
-Content-Type: application/json
-X-Demo-User-Id: {{userId}}
-
-{"action":"mark_awake"}
-
-### WebSocket（使用支持 WebSocket 的 HTTP 客户端）
+### Android 状态 WebSocket（仅 JSON 事件）
 WS {{baseUrl}}/api/v1/ws?userId={{userId}}
+
+### T5 Voice WebSocket
+# 地址：ws://localhost:8325/api/v1/device/voice?deviceId={{deviceId}}&userId={{userId}}
+# 控制帧为 JSON text；音频帧为 24kHz/16-bit/mono/20ms、960-byte binary PCM。
+# 普通 .http 示例不适合表达二进制时序，请按 docs/hardware-integration.md 实现。

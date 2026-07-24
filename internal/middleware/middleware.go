@@ -68,7 +68,7 @@ func CORS(origins []string) gin.HandlerFunc {
 			}
 		}
 		c.Header("Access-Control-Allow-Headers", "Content-Type, X-Demo-User-Id, X-Request-Id")
-		c.Header("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET, PUT, PATCH, POST, DELETE, OPTIONS")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return

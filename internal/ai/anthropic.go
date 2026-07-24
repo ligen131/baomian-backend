@@ -81,7 +81,11 @@ func (a *AnthropicAdapter) Generate(ctx context.Context, request Request) (dto.A
 			text.WriteString(content.Text)
 		}
 	}
-	value := stripCodeFence(strings.TrimSpace(text.String()))
+	return parseResult(text.String(), request.TurnIndex)
+}
+
+func parseResult(content string, turnIndex int) (dto.AIResult, error) {
+	value := stripCodeFence(strings.TrimSpace(content))
 	if value == "" {
 		return dto.AIResult{}, fmt.Errorf("%w: empty text content", ErrInvalidResponse)
 	}
@@ -93,7 +97,7 @@ func (a *AnthropicAdapter) Generate(ctx context.Context, request Request) (dto.A
 	if err := validateResult(result); err != nil {
 		return dto.AIResult{}, err
 	}
-	if request.TurnIndex >= 3 {
+	if turnIndex >= 3 {
 		result.ShouldFinalize = true
 	}
 	result.Fallback = false

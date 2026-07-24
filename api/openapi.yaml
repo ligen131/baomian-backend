@@ -1,25 +1,26 @@
 openapi: 3.1.0
 info:
   title: 抱眠 MVP Backend API
-  version: 0.1.0
+  version: 0.2.0
   description: |
-    抱眠 P0 APP、AI 与 T5 设备网关契约。P0 不包含正式登录；除设备接口外，
-    通过 X-Demo-User-Id 选择演示用户，缺省为 expo-user-001。
+    抱眠 P0+P1 Android、AI 与 T5 设备网关契约。当前使用 Demo User 身份。
+    T5 通过独立 WebSocket 流式传输 PCM；后端桥接火山引擎 ASR/TTS，并继续使用现有 Claude 三轮服务。
+    Android 只负责设置、状态、设备在线和晚安日记，不参与正式语音链路。
 servers:
   - url: https://bm.lg.gl/api/v1
-    description: 线上环境
+    description: 线上测试环境
   - url: http://localhost:8325/api/v1
-    description: 本地开发环境
+    description: 本地测试环境
 security:
   - DemoUser: []
 tags:
-  - name: System
-  - name: Profile
-  - name: Tonight
-  - name: Conversation
-  - name: Journal
-  - name: Device
-  - name: Realtime
+  - {name: System}
+  - {name: Profile}
+  - {name: Tonight}
+  - {name: Conversation}
+  - {name: Journal}
+  - {name: Device}
+  - {name: Realtime}
 paths:
   /health:
     get:
@@ -27,217 +28,226 @@ paths:
       security: []
       summary: 服务和数据库健康检查
       responses:
-        "200":
-          description: 健康
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Health"}
-        "503":
-          description: 数据库不可用
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Health"}
+        "200": {description: 健康, content: {application/json: {schema: {$ref: "#/components/schemas/Health"}}}}
+        "503": {description: 数据库不可用, content: {application/json: {schema: {$ref: "#/components/schemas/Health"}}}}
   /profile:
     get:
       tags: [Profile]
       summary: 获取或初始化用户设置
       responses:
-        "200":
-          description: 用户设置
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Profile"}
+        "200": {description: 用户设置, content: {application/json: {schema: {$ref: "#/components/schemas/Profile"}}}}
         default: {$ref: "#/components/responses/Error"}
     put:
       tags: [Profile]
-      summary: 更新用户设置
+      summary: 部分更新用户设置；未提供的字段保持不变
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/Profile"}
+        content: {application/json: {schema: {$ref: "#/components/schemas/UpdateProfileRequest"}}}
       responses:
-        "200":
-          description: 更新后的用户设置
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Profile"}
+        "200": {description: 更新后的用户设置, content: {application/json: {schema: {$ref: "#/components/schemas/Profile"}}}}
         default: {$ref: "#/components/responses/Error"}
   /tonight:
     get:
       tags: [Tonight]
-      summary: 获取今晚状态
+      summary: 按 Profile IANA 时区获取今晚状态
       responses:
-        "200":
-          description: 今晚状态
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/TonightState"}
+        "200": {description: 今晚状态, content: {application/json: {schema: {$ref: "#/components/schemas/TonightState"}}}}
         default: {$ref: "#/components/responses/Error"}
   /tonight/actions:
     post:
       tags: [Tonight]
-      summary: 执行 APP 演示动作
+      summary: 执行 APP 动作
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/TonightActionRequest"}
+        content: {application/json: {schema: {$ref: "#/components/schemas/TonightActionRequest"}}}
       responses:
-        "200":
-          description: 更新后的今晚状态
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/TonightState"}
+        "200": {description: 更新后的今晚状态, content: {application/json: {schema: {$ref: "#/components/schemas/TonightState"}}}}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /conversations/tonight:
+    get:
+      tags: [Conversation]
+      summary: 获取今晚完整对话与恢复信息
+      responses:
+        "200": {description: 对话历史, content: {application/json: {schema: {$ref: "#/components/schemas/ConversationHistoryResponse"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /conversations/activity:
+    post:
+      tags: [Conversation]
+      summary: 上报输入或说话活动并延长 20 秒静默截止（不超过 4 分钟硬截止）
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/ConversationActivityRequest"}}}
+      responses:
+        "200": {description: 更新后的今晚状态, content: {application/json: {schema: {$ref: "#/components/schemas/TonightState"}}}}
         "409": {$ref: "#/components/responses/Error"}
         default: {$ref: "#/components/responses/Error"}
   /conversations/turn:
     post:
       tags: [Conversation]
-      summary: 提交一轮睡前倾诉
+      summary: Debug 客户端提交一轮文字；T5 语音由后端内部复用同一服务
+      description: clientRequestId 用于网络重试幂等；T5 语音路径将 turnId 作为 clientRequestId 并设置 inputMode=voice。相同请求处理中返回 409，完成后返回已有回复。
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/ConversationTurnRequest"}
+        content: {application/json: {schema: {$ref: "#/components/schemas/ConversationTurnRequest"}}}
       responses:
-        "200":
-          description: AI 回复与今晚状态
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/ConversationTurnResponse"}
+        "200": {description: AI 回复与今晚状态, content: {application/json: {schema: {$ref: "#/components/schemas/ConversationTurnResponse"}}}}
         "409": {$ref: "#/components/responses/Error"}
         "502": {$ref: "#/components/responses/Error"}
         default: {$ref: "#/components/responses/Error"}
   /conversations/finalize:
     post:
       tags: [Conversation]
-      summary: 提前结束倾诉并生成/更新记忆卡
+      summary: 提前结束倾诉并生成或更新晚安卡
       responses:
-        "200":
-          description: 记忆卡与今晚状态
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/FinalizeResponse"}
+        "200": {description: 晚安卡与今晚状态, content: {application/json: {schema: {$ref: "#/components/schemas/FinalizeResponse"}}}}
         "409": {$ref: "#/components/responses/Error"}
         default: {$ref: "#/components/responses/Error"}
   /journals:
     get:
       tags: [Journal]
-      summary: 获取最近记忆卡
-      parameters:
-        - {$ref: "#/components/parameters/Limit"}
+      summary: 获取最近晚安卡
+      parameters: [{$ref: "#/components/parameters/Limit"}]
       responses:
         "200":
-          description: 记忆卡列表
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: "#/components/schemas/MemoryCard"}
+          description: 晚安卡列表
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/MemoryCard"}}}}
         default: {$ref: "#/components/responses/Error"}
+  /journals/{id}:
+    parameters: [{$ref: "#/components/parameters/JournalID"}]
+    get:
+      tags: [Journal]
+      summary: 获取本人单张晚安卡
+      responses:
+        "200": {description: 晚安卡, content: {application/json: {schema: {$ref: "#/components/schemas/MemoryCard"}}}}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Journal]
+      summary: 完成或取消完成明日待办
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/UpdateMemoryCardRequest"}}}
+      responses:
+        "200": {description: 更新后的晚安卡, content: {application/json: {schema: {$ref: "#/components/schemas/MemoryCard"}}}}
+        "404": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Journal]
+      summary: 删除本人单卡及对应当晚对话
+      description: 正在进行的 Session 返回 409；保留 NightSession、设备事件与命令。
+      responses:
+        "204": {description: 删除成功}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
   /memories:
     get:
       tags: [Journal]
-      summary: 获取最近记忆卡（journals 别名）
-      parameters:
-        - {$ref: "#/components/parameters/Limit"}
+      summary: 获取最近晚安卡（journals 别名）
+      parameters: [{$ref: "#/components/parameters/Limit"}]
       responses:
         "200":
-          description: 记忆卡列表
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: "#/components/schemas/MemoryCard"}
-        default: {$ref: "#/components/responses/Error"}
+          description: 晚安卡列表
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/MemoryCard"}}}}
   /ws:
     get:
       tags: [Realtime]
       summary: 建立按用户广播的 WebSocket
-      description: 返回 tonight.updated、device.event、conversation.reply、journal.created 事件。
+      description: 支持 tonight.updated、device.event、device.status、conversation.reply、journal.created/updated/deleted。
       parameters:
-        - name: userId
-          in: query
-          schema: {type: string, default: expo-user-001}
+        - {name: userId, in: query, schema: {type: string, default: expo-user-001}}
       responses:
         "101": {description: WebSocket 升级成功}
+  /device/voice:
+    get:
+      tags: [Device, Realtime]
+      security: []
+      summary: Upgrade to the T5 voice WebSocket
+      description: |
+        Control frames are UTF-8 JSON text messages. Audio frames are raw PCM signed 16-bit
+        little-endian, 24000 Hz, mono, 20 ms, exactly 960 bytes per WebSocket binary message.
+        Uplink controls: session.start, input.start, input.end, playback.stop.
+        Downlink controls: session.ready, input.accepted, transcript.final, thinking,
+        playback.start, playback.end, conversation.completed, guidance.start, playback.stop, error.
+        The full ordered event protocol, push-to-talk behavior, interruption and reconnect rules are
+        defined in docs/hardware-integration.md and docs/voice-streaming-design.md.
+        Returns HTTP 503 before upgrade when the Volcengine ASR App ID, ASR Access Token, or TTS API Key is missing.
+      parameters:
+        - {name: deviceId, in: query, required: true, schema: {type: string}}
+        - {name: userId, in: query, required: false, schema: {type: string, default: expo-user-001}}
+      responses:
+        "101": {description: WebSocket upgrade succeeded}
+        "400": {description: Missing or invalid deviceId, content: {application/json: {schema: {$ref: "#/components/schemas/ErrorEnvelope"}}}}
+        "503": {description: Speech service is not configured, content: {application/json: {schema: {$ref: "#/components/schemas/ErrorEnvelope"}}}}
   /device/events:
     post:
       tags: [Device]
       security: []
-      summary: 上报 T5 设备事件
-      description: eventId 全局幂等；重复上报返回首次处理结果并标记 duplicate=true。
+      summary: 上报 T5 设备事件并刷新 lastSeenAt
+      description: eventId 全局幂等；重复上报返回首次结果并标记 duplicate=true。
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/DeviceEventRequest"}
+        content: {application/json: {schema: {$ref: "#/components/schemas/DeviceEventRequest"}}}
       responses:
-        "200":
-          description: 处理后的状态和新建命令
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/DeviceEventResponse"}
+        "200": {description: 处理结果, content: {application/json: {schema: {$ref: "#/components/schemas/DeviceEventResponse"}}}}
         "409": {$ref: "#/components/responses/Error"}
         default: {$ref: "#/components/responses/Error"}
+  /device/heartbeat:
+    post:
+      tags: [Device]
+      security: []
+      summary: 上报设备在线快照
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/DeviceHeartbeatRequest"}}}
+      responses:
+        "200": {description: 设备状态, content: {application/json: {schema: {$ref: "#/components/schemas/DeviceStatus"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /devices/{deviceId}/status:
+    get:
+      tags: [Device]
+      summary: 获取当前 Demo 用户的设备在线状态
+      parameters:
+        - {name: deviceId, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: 设备状态, content: {application/json: {schema: {$ref: "#/components/schemas/DeviceStatus"}}}}
+        "404": {$ref: "#/components/responses/Error"}
   /device/commands/next:
     get:
       tags: [Device]
       security: []
       summary: 长轮询领取下一条设备命令
+      description: 命令采用 lease 和 at-least-once 投递；固件必须按 command id 本地去重。
       parameters:
-        - name: deviceId
-          in: query
-          required: true
-          schema: {type: string}
-        - name: timeoutSec
-          in: query
-          schema: {type: integer, minimum: 0, maximum: 30, default: 20}
+        - {name: deviceId, in: query, required: true, schema: {type: string}}
+        - {name: timeoutSec, in: query, schema: {type: integer, minimum: 0, maximum: 30, default: 20}}
       responses:
-        "200":
-          description: 命令已领取并标记 dispatched
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Command"}
-        "204": {description: 超时前没有待领取命令}
+        "200": {description: 命令已领取, content: {application/json: {schema: {$ref: "#/components/schemas/Command"}}}}
+        "204": {description: 没有命令}
         default: {$ref: "#/components/responses/Error"}
   /device/commands/ack:
     post:
       tags: [Device]
       security: []
-      summary: ACK 设备命令
+      summary: 幂等 ACK 设备命令
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: {$ref: "#/components/schemas/CommandAckRequest"}
+        content: {application/json: {schema: {$ref: "#/components/schemas/CommandAckRequest"}}}
       responses:
-        "200":
-          description: 更新后的命令
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Command"}
+        "200": {description: 更新后的命令, content: {application/json: {schema: {$ref: "#/components/schemas/Command"}}}}
         "404": {$ref: "#/components/responses/Error"}
-        default: {$ref: "#/components/responses/Error"}
 components:
   securitySchemes:
     DemoUser:
       type: apiKey
       in: header
       name: X-Demo-User-Id
-      description: P0 演示身份；省略时使用 expo-user-001。
+      description: Demo 身份，不是生产鉴权。
   parameters:
-    Limit:
-      name: limit
-      in: query
-      schema: {type: integer, minimum: 1, maximum: 30, default: 7}
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 30, default: 7}}
+    JournalID: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
   responses:
     Error:
       description: 统一错误响应
-      content:
-        application/json:
-          schema: {$ref: "#/components/schemas/ErrorEnvelope"}
+      content: {application/json: {schema: {$ref: "#/components/schemas/ErrorEnvelope"}}}
   schemas:
     Health:
       type: object
@@ -248,55 +258,70 @@ components:
     Profile:
       type: object
       additionalProperties: false
-      required: [bedtime, wakeTime, persona, reminderStyle, defaultGuidance, whiteNoiseDurationMin]
+      required: [bedtime, wakeTime, persona, reminderStyle, defaultGuidance, whiteNoiseDurationMin, timeZone, bedtimeReminderEnabled, wakeAlarmEnabled]
       properties:
         bedtime: {type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", example: "23:00"}
-        wakeTime: {type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", example: "07:00"}
+        wakeTime: {type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", example: "07:30"}
         persona: {type: string, enum: [gentle, rational, firm]}
         reminderStyle: {type: string, enum: [gentle, firm]}
         defaultGuidance: {$ref: "#/components/schemas/Guidance"}
         whiteNoiseDurationMin: {type: integer, enum: [10, 20, 30]}
-    Guidance:
-      type: string
-      enum: [rain, brown_noise, breathing_46, silence]
-    Phase:
-      type: string
-      enum: [WAITING_TO_LOCK, LOCKED, CONVERSATION, CHOOSING_GUIDANCE, SLEEPING, SUNRISE, AWAKE, PHONE_REMOVED]
+        timeZone: {type: string, example: Asia/Shanghai}
+        bedtimeReminderEnabled: {type: boolean}
+        wakeAlarmEnabled: {type: boolean}
+    UpdateProfileRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        bedtime: {type: string}
+        wakeTime: {type: string}
+        persona: {type: string, enum: [gentle, rational, firm]}
+        reminderStyle: {type: string, enum: [gentle, firm]}
+        defaultGuidance: {$ref: "#/components/schemas/Guidance"}
+        whiteNoiseDurationMin: {type: integer, enum: [10, 20, 30]}
+        timeZone: {type: string}
+        bedtimeReminderEnabled: {type: boolean}
+        wakeAlarmEnabled: {type: boolean}
+    Guidance: {type: string, enum: [rain, brown_noise, breathing_46, silence]}
+    Phase: {type: string, enum: [WAITING_TO_LOCK, LOCKED, CONVERSATION, CHOOSING_GUIDANCE, SLEEPING, SUNRISE, AWAKE, PHONE_REMOVED]}
     TonightState:
       type: object
-      required: [id, date, phase, bedtime, wakeTime, conversationTurns, audioPlaying, pausedForTonight, device, sunrise]
+      required: [id, date, phase, bedtime, wakeTime, whiteNoiseDurationMin, conversationTurns, audioPlaying, pausedForTonight, remindersSkipped, device, sunrise]
       properties:
         id: {type: string, format: uuid}
         date: {type: string, format: date}
         phase: {$ref: "#/components/schemas/Phase"}
         bedtime: {type: string}
         wakeTime: {type: string}
+        whiteNoiseDurationMin: {type: integer, enum: [10, 20, 30]}
         conversationTurns: {type: integer, minimum: 0, maximum: 3}
         selectedGuidance: {$ref: "#/components/schemas/Guidance"}
         audioPlaying: {type: boolean}
         pausedForTonight: {type: boolean}
-        device:
-          type: object
-          required: [boxClosed]
-          properties:
-            boxClosed: {type: boolean}
-        sunrise:
-          type: object
-          required: [progress]
-          properties:
-            progress: {type: integer, minimum: 0, maximum: 100}
-        latestAIDraft:
-          type: object
-          additionalProperties: true
+        remindersSkipped: {type: boolean}
+        finalizeReason: {type: string, enum: [manual, turn_limit, silence, max_duration]}
+        conversationStartedAt: {type: string, format: date-time}
+        conversationSilenceDeadlineAt: {type: string, format: date-time}
+        conversationHardDeadlineAt: {type: string, format: date-time}
+        conversationProcessingUntil: {type: string, format: date-time}
+        phoneRemovedAt: {type: string, format: date-time}
+        resumeDeadlineAt: {type: string, format: date-time}
+        audioEndsAt: {type: string, format: date-time}
+        device: {type: object, required: [boxClosed], properties: {boxClosed: {type: boolean}}}
+        sunrise: {type: object, required: [progress], properties: {progress: {type: integer, minimum: 0, maximum: 100}}}
+        latestAIDraft: {type: object, additionalProperties: true}
     TonightActionRequest:
       type: object
       required: [action]
       properties:
-        action:
-          type: string
-          enum: [simulate_box_closed, simulate_box_opened, start_conversation, select_guidance, stop_audio, simulate_alarm, snooze, mark_awake]
+        action: {type: string, enum: [simulate_box_closed, simulate_box_opened, start_conversation, select_guidance, stop_audio, simulate_alarm, snooze, mark_awake, skip_tonight_reminders]}
         guidance: {$ref: "#/components/schemas/Guidance"}
         payload: {type: object, additionalProperties: true}
+    ConversationActivityRequest:
+      type: object
+      properties:
+        activity: {type: string, enum: [typing, speaking, listening]}
     ConversationTurnRequest:
       type: object
       additionalProperties: false
@@ -304,9 +329,29 @@ components:
       properties:
         text: {type: string}
         inputMode: {type: string, enum: [text, voice], default: text}
+        clientRequestId: {type: string, maxLength: 128}
+    ConversationTurn:
+      type: object
+      required: [id, role, text, turnIndex, fallback, inputMode, createdAt]
+      properties:
+        id: {type: string, format: uuid}
+        role: {type: string, enum: [user, assistant]}
+        text: {type: string}
+        turnIndex: {type: integer}
+        fallback: {type: boolean}
+        inputMode: {type: string, enum: [text, voice]}
+        clientRequestId: {type: string}
+        createdAt: {type: string, format: date-time}
+    ConversationHistoryResponse:
+      type: object
+      required: [turns, tonight, remainingTurns, processing]
+      properties:
+        turns: {type: array, items: {$ref: "#/components/schemas/ConversationTurn"}}
+        tonight: {$ref: "#/components/schemas/TonightState"}
+        remainingTurns: {type: integer, minimum: 0, maximum: 3}
+        processing: {type: boolean}
     AIResult:
       type: object
-      additionalProperties: false
       required: [reply, emotion, worry, tomorrowTask, comfort, guidanceOptions, suggestedGuidance, shouldFinalize, fallback]
       properties:
         reply: {type: string}
@@ -314,15 +359,7 @@ components:
         worry: {type: string}
         tomorrowTask: {type: string}
         comfort: {type: string}
-        guidanceOptions:
-          type: array
-          prefixItems:
-            - {const: rain}
-            - {const: brown_noise}
-            - {const: breathing_46}
-            - {const: silence}
-          minItems: 4
-          maxItems: 4
+        guidanceOptions: {type: array, items: {$ref: "#/components/schemas/Guidance"}, minItems: 4, maxItems: 4}
         suggestedGuidance: {$ref: "#/components/schemas/Guidance"}
         shouldFinalize: {type: boolean}
         fallback: {type: boolean}
@@ -334,9 +371,15 @@ components:
         result: {$ref: "#/components/schemas/AIResult"}
         tonight: {$ref: "#/components/schemas/TonightState"}
         journal: {$ref: "#/components/schemas/MemoryCard"}
+    FinalizeResponse:
+      type: object
+      required: [journal, tonight]
+      properties:
+        journal: {$ref: "#/components/schemas/MemoryCard"}
+        tonight: {$ref: "#/components/schemas/TonightState"}
     MemoryCard:
       type: object
-      required: [id, date, emotion, worry, tomorrowTask, comfort, suggestedGuidance, fallback, createdAt]
+      required: [id, date, emotion, worry, tomorrowTask, comfort, suggestedGuidance, fallback, tomorrowTaskCompleted, createdAt]
       properties:
         id: {type: string, format: uuid}
         date: {type: string, format: date}
@@ -346,24 +389,22 @@ components:
         comfort: {type: string}
         suggestedGuidance: {$ref: "#/components/schemas/Guidance"}
         fallback: {type: boolean}
+        tomorrowTaskCompleted: {type: boolean}
+        tomorrowTaskCompletedAt: {type: string, format: date-time}
         createdAt: {type: string, format: date-time}
-    FinalizeResponse:
-      type: object
-      required: [journal, tonight]
-      properties:
-        journal: {$ref: "#/components/schemas/MemoryCard"}
-        tonight: {$ref: "#/components/schemas/TonightState"}
-    DeviceEventRequest:
+    UpdateMemoryCardRequest:
       type: object
       additionalProperties: false
+      required: [tomorrowTaskCompleted]
+      properties: {tomorrowTaskCompleted: {type: boolean}}
+    DeviceEventRequest:
+      type: object
       required: [eventId, deviceId, type]
       properties:
         eventId: {type: string}
         deviceId: {type: string}
         userId: {type: string, default: expo-user-001}
-        type:
-          type: string
-          enum: [box_closed, box_opened, soft_button/short_press, soft_button/long_press, alarm_start]
+        type: {type: string, enum: [box_closed, box_opened, soft_button/short_press, soft_button/long_press, alarm_start]}
         payload: {type: object, additionalProperties: true}
         occurredAt: {type: string, format: date-time}
     DeviceEventResponse:
@@ -372,12 +413,32 @@ components:
       properties:
         duplicate: {type: boolean}
         tonight: {$ref: "#/components/schemas/TonightState"}
-        commands:
-          type: array
-          items: {$ref: "#/components/schemas/Command"}
+        commands: {type: array, items: {$ref: "#/components/schemas/Command"}}
+    DeviceHeartbeatRequest:
+      type: object
+      required: [deviceId]
+      properties:
+        deviceId: {type: string}
+        userId: {type: string}
+        firmwareVersion: {type: string}
+        capabilities: {type: object, additionalProperties: true}
+        status: {type: object, additionalProperties: true}
+        localTime: {type: string, format: date-time}
+    DeviceStatus:
+      type: object
+      required: [deviceId, userId, firmwareVersion, capabilities, status, lastSeenAt, online]
+      properties:
+        deviceId: {type: string}
+        userId: {type: string}
+        firmwareVersion: {type: string}
+        capabilities: {type: object, additionalProperties: true}
+        status: {type: object, additionalProperties: true}
+        localTime: {type: string, format: date-time}
+        lastSeenAt: {type: string, format: date-time}
+        online: {type: boolean, description: lastSeenAt 距服务端当前时间不超过 90 秒}
     Command:
       type: object
-      required: [id, deviceId, type, payload, status, createdAt]
+      required: [id, deviceId, type, payload, status, createdAt, attempt]
       properties:
         id: {type: string, format: uuid}
         deviceId: {type: string}
@@ -385,9 +446,10 @@ components:
         payload: {type: object, additionalProperties: true}
         status: {type: string, enum: [pending, dispatched, acked, failed]}
         createdAt: {type: string, format: date-time}
+        attempt: {type: integer, minimum: 0}
+        leaseExpiresAt: {type: string, format: date-time}
     CommandAckRequest:
       type: object
-      additionalProperties: false
       required: [deviceId, commandId, success]
       properties:
         deviceId: {type: string}
@@ -398,7 +460,7 @@ components:
       type: object
       required: [type, occurredAt, data]
       properties:
-        type: {type: string, enum: [tonight.updated, device.event, conversation.reply, journal.created, error]}
+        type: {type: string, enum: [tonight.updated, device.event, device.status, conversation.reply, journal.created, journal.updated, journal.deleted, error]}
         occurredAt: {type: string, format: date-time}
         data: {}
     ErrorEnvelope:
@@ -409,6 +471,6 @@ components:
           type: object
           required: [code, message]
           properties:
-            code: {type: string}
+            code: {type: string, enum: [validation_error, invalid_transition, conversation_limit, conversation_expired, request_in_progress, journal_not_deletable, not_found, ai_error, storage_error, internal_error, speech_not_configured, invalid_phase, invalid_event, invalid_audio_frame, turn_in_progress, turn_too_long, asr_unavailable, empty_transcript, ai_unavailable, tts_unavailable, device_too_slow]}
             message: {type: string}
             details: {type: object, additionalProperties: true}

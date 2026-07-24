@@ -60,6 +60,14 @@ func (a *FallbackAdapter) Generate(_ context.Context, request Request) (dto.AIRe
 		result.SuggestedGuidance = "silence"
 		result.ShouldFinalize = true
 	}
+	switch request.Persona {
+	case "rational":
+		result.Reply = "这件事已经记下了。今晚先停在这里，明早只处理最明确的一步。"
+		result.Comfort = "事情已被放好，现在可以休息。"
+	case "firm":
+		result.Reply = "今晚到这里就够了。剩下的留给明天，现在先让自己休息。"
+		result.Comfort = "你不需要在今晚完成所有事。"
+	}
 	return result, nil
 }
 

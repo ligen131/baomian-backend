@@ -1,4 +1,4 @@
-.PHONY: tidy fmt test race migrate-up migrate-down run compose-up compose-down smoke
+.PHONY: tidy fmt test race migrate-up migrate-down run compose-up compose-down smoke backup restore
 
 tidy:
 	go mod tidy
@@ -29,3 +29,9 @@ compose-down:
 
 smoke:
 	./scripts/smoke.sh
+
+backup:
+	./scripts/backup.sh
+
+restore:
+	./scripts/restore.sh $(BACKUP)

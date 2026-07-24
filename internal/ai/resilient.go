@@ -26,7 +26,9 @@ func (a *ResilientAdapter) Generate(ctx context.Context, request Request) (dto.A
 	if err == nil {
 		return result, nil
 	}
-	a.logger.WarnContext(ctx, "AI primary adapter failed, using fallback", "error", err)
+	if a.logger != nil {
+		a.logger.WarnContext(ctx, "AI primary adapter failed, using fallback", "error", err)
+	}
 	result, fallbackErr := a.fallback.Generate(ctx, request)
 	if fallbackErr != nil {
 		return dto.AIResult{}, fallbackErr

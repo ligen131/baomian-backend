@@ -1,456 +1,429 @@
 # 抱眠硬件（T5）与后端对接文档
 
-> 文档版本：P0 / 2026-07-23
->
-> 适用对象：硬件固件、嵌入式网络与联调人员
->
+> 文档版本：P1 Voice Streaming / 2026-07-24
 > 线上 API Base URL：`https://bm.lg.gl/api/v1`
 
-## 1. 对接目标
+## 1. 对接总览
 
-硬件与后端之间采用 HTTPS + JSON，分为两条链路：
+T5 使用三类后端链路：
 
-1. **设备上报事件**：仓盖开合、按键、设备本地闹钟触发。
-2. **设备领取并执行命令**：音频、灯光、晨光与闹钟控制；执行后回传 ACK。
+1. **实时语音 WebSocket**：长按说话、PCM 上行、TTS PCM 下行、边收边播、打断和三轮完成。
+2. **HTTPS 设备接口**：heartbeat、闭仓、开仓和晨光事件。
+3. **HTTPS 命令队列**：晨光、闹钟及非实时设备控制，lease + at-least-once 投递。
 
 ```text
-T5 硬件                              抱眠后端
-   │                                    │
-   │ POST /device/events                │  上报传感器/按键事件
-   ├───────────────────────────────────>│
-   │ 200（事件处理结果）                 │
-   │<───────────────────────────────────┤
-   │                                    │
-   │ GET /device/commands/next          │  长轮询领取命令
-   ├───────────────────────────────────>│
-   │ 200 command / 204 no command       │
-   │<───────────────────────────────────┤
-   │                                    │
-   │ 在硬件本地执行 command              │
-   │                                    │
-   │ POST /device/commands/ack          │  上报执行结果
-   ├───────────────────────────────────>│
-   │ 200                                │
-   │<───────────────────────────────────┤
+T5 PCM -> Device Voice WebSocket -> Baomian -> Volcengine ASR
+                                         -> Claude
+T5 PCM <- Device Voice WebSocket <- Baomian <- Volcengine TTS
+
+T5 -> heartbeat/events -> state machine -> Android state WebSocket
+T5 <- command next/ack <- reliable command queue
 ```
 
-## 2. 联调前需要约定的标识
+T5 不连接火山引擎、不保存火山引擎 Token、不解析 Claude 响应，也不缓存完整录音。
 
-每台硬件需要持久化两个标识：
+## 2. 标识与认证边界
 
 | 字段 | 示例 | 说明 |
 |---|---|---|
-| `deviceId` | `expo-device-001` | 设备唯一标识；事件、取命令和 ACK 必须使用同一个值 |
-| `userId` | `expo-user-001` | 当前绑定的 Demo 用户；P0 阶段由团队约定或烧录配置 |
+| `deviceId` | `expo-device-001` | 设备唯一 ID，重启后不变 |
+| `userId` | `expo-user-001` | 当前 Demo 绑定用户 |
+| `firmwareVersion` | `1.1.0` | heartbeat 上报 |
 
-要求：
+当前 MVP 仍是 Demo User，尚无正式设备证书。所有公网连接必须使用 HTTPS/WSS；不要在固件内加入火山引擎或 Claude 凭证。
 
-- 同时联调多台硬件时，每台设备必须使用不同的 `deviceId`。
-- 不要在每次重启时随机生成 `deviceId`，应保存在 NVS/Flash 中。
-- 换绑用户时只更新 `userId`，不要改变设备自身的 `deviceId`。
-- P0 尚无正式设备注册接口，具体取值请与后端/APP 同学确认。
+## 3. 实时语音 WebSocket
 
-## 3. 通用协议
+### 3.1 连接
 
-### 3.1 请求格式
+```text
+wss://bm.lg.gl/api/v1/device/voice?deviceId=<URL encoded deviceId>&userId=<URL encoded userId>
+```
 
-- 协议：HTTPS
-- JSON 编码：UTF-8
-- 请求头：`Content-Type: application/json`
-- 时间：RFC 3339，推荐 UTC，例如 `2026-07-23T14:30:00Z`
-- 线上 Base URL：`https://bm.lg.gl/api/v1`
+- `deviceId` 必填；`userId` 可省略并使用后端默认 Demo User，但联调建议显式传入。
+- 同一 `deviceId` 只允许一条活跃连接；新连接替换旧连接。
+- 使用标准 WebSocket ping/pong。固件必须回复 ping，并在断线后指数退避重连。
+- 建议重连：`1s -> 2s -> 4s -> 8s -> 15s -> 15s...`。
+- 后端未配置火山引擎 ASR App ID、ASR Access Token 或 TTS API Key 时，upgrade 前返回 HTTP 503 `speech_not_configured`。
 
-设备接口当前不需要 `X-Demo-User-Id` Header。`userId` 通过设备事件 JSON 传入。
+| WebSocket message type | 内容 |
+|---|---|
+| Text | UTF-8 JSON control event |
+| Binary | raw PCM audio，不含 header |
+| Ping/Pong | 标准连接保活 |
 
-### 3.2 当前认证边界
+火山引擎使用自己的 V3 binary protocol；T5 不收发或解析任何上游供应商事件。后端会把 10 个 20 ms T5 帧聚合成约 200 ms 的 ASR 上游包，T5 固件仍严格发送 960-byte 帧。
 
-P0 设备接口暂未启用设备密钥或签名，仅依赖 HTTPS。固件中不要自行添加尚未约定的 `Authorization` Header。正式生产前，后端会另行增加设备凭证；届时本文档会升级版本。
+### 3.2 固定音频格式
 
-### 3.3 统一错误格式
+| 参数 | 值 |
+|---|---|
+| 编码 | PCM signed linear |
+| 字节序 | little-endian |
+| 采样率 | 24000 Hz |
+| 位深 | 16 bit |
+| 声道 | mono |
+| 帧长 | 20 ms |
+| 每条 binary message | 960 bytes |
+
+计算：`24000 * 0.02 * 2 = 960 bytes`。不发送 WAV header，不发送半帧；最后一帧不足时在设备侧补零。
+
+建议播放环形缓冲 100–300 ms，即 5–15 帧。缓冲必须有界，禁止缓存完整回复。
+
+## 4. 语音控制协议
+
+每个 T5 上行控制事件包含 `type`、UUID `eventId`；轮次事件还包含 UUID `turnId`。
+
+### 4.1 建连就绪（后端下行）
 
 ```json
 {
-  "error": {
-    "code": "invalid_transition",
-    "message": "当前状态不接受此设备事件",
-    "details": {
-      "phase": "AWAKE",
-      "eventType": "alarm_start"
-    }
-  }
+  "type":"session.ready",
+  "phase":"LOCKED",
+  "completedTurns":0,
+  "audio":{"codec":"pcm","sampleRate":24000,"bitDepth":16,"channels":1,"frameMs":20}
 }
 ```
 
-常见状态码：
+固件必须校验 audio 参数。不支持返回格式时停止语音流程并上报诊断，不能按错误采样率播放。
 
-| HTTP 状态 | 含义 | 硬件处理建议 |
-|---|---|---|
-| `200` | 成功 | 解析响应并继续流程 |
-| `204` | 长轮询期间没有命令 | 正常情况，立即发起下一次长轮询 |
-| `400` | JSON、参数或事件类型错误 | 不要原样重试；记录日志并修复固件/配置 |
-| `404` | ACK 的命令不存在，或 `deviceId` 不匹配 | 检查标识；不要无限重试 |
-| `409` | 当前业务状态不接受该事件 | 不要高频重试；记录错误并等待下一次真实状态变化 |
-| `500` | 后端或数据库暂时异常 | 使用退避策略重试 |
+### 4.2 开始今晚会话（T5 上行）
 
-## 4. 上报硬件事件
+闭仓 REST 事件成功并收到 `session.ready` 后发送：
 
-### 4.1 接口
+```json
+{"type":"session.start","eventId":"3db25df5-5f70-48f4-97d7-e823aa1b8bce"}
+```
+
+从 `LOCKED` 首次启动时，后端进入 `CONVERSATION` 并播放短开场白。开场白不计入三轮。
+
+### 4.3 播放（后端下行）
+
+```json
+{
+  "type":"playback.start",
+  "playbackId":"ca7d3ee8-d79c-4df0-b4e3-ceee2c156ceb",
+  "kind":"opening",
+  "text":"手机已经安放好了。今晚有什么想和眠眠说的吗？"
+}
+```
+
+之后连续收到 960-byte binary PCM，T5 边收边播。完成时收到：
+
+```json
+{"type":"playback.end","playbackId":"ca7d3ee8-d79c-4df0-b4e3-ceee2c156ceb","reason":"completed"}
+```
+
+`kind`：`opening`、`reply`、`guidance`。`reason`：`completed`、`interrupted`、`upstream_error`。
+
+### 4.4 长按开始说话（T5 上行）
+
+按键按下并达到固件长按阈值后：
+
+1. 如果正在播放，立即停止播放器并清空环形缓冲。
+2. 发送 `playback.stop`。
+3. 生成新的 `turnId`。
+4. 发送 `input.start`。
+5. 等待 `input.accepted` 后实时发送 binary PCM；允许极小预录缓冲避免吞掉开头，但不得缓存完整录音。
+
+```json
+{"type":"playback.stop","eventId":"b8391c5d-7746-4705-bb74-4e145749513e"}
+```
+
+```json
+{
+  "type":"input.start",
+  "eventId":"ff4af57c-64ef-4e29-a6ed-a5f0bf445247",
+  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"
+}
+```
+
+后端接受：
+
+```json
+{"type":"input.accepted","turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"}
+```
+
+每次长按最长 60 秒。固件到 60 秒时必须自动结束采集并发送 `input.end`。
+
+### 4.5 松开结束说话（T5 上行）
+
+```json
+{
+  "type":"input.end",
+  "eventId":"53bd7e56-2858-499e-a04d-2182ba299178",
+  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"
+}
+```
+
+`turnId` 必须与 `input.start` 相同。随后后端可能发送：
+
+```json
+{"type":"transcript.final","turnId":"8ea4105c-bc68-46de-b625-c49281c6688f","text":"今天工作有点累"}
+```
+
+```json
+{"type":"thinking","turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"}
+```
+
+`transcript.final.text` 仅供联调，正式固件可忽略，不得持久化。`thinking` 时允许播放一次很短的本地提示音，不得循环。
+
+Claude 回复开始：
+
+```json
+{
+  "type":"playback.start",
+  "playbackId":"7d3cff76-dc99-44ea-b0ae-064d13333a50",
+  "kind":"reply",
+  "turn":1,
+  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f",
+  "text":"辛苦了，今晚先不用急着把所有事情解决。"
+}
+```
+
+### 4.6 短按静音
+
+短按时固件必须先本地立即停止并清空播放缓冲，然后发送：
+
+```json
+{"type":"playback.stop","eventId":"587c89f0-97b4-4892-b5ab-564977b947fe"}
+```
+
+不要等待后端 ACK 才停止声音。
+
+### 4.7 后端要求停止
+
+```json
+{
+  "type":"playback.stop",
+  "playbackId":"7d3cff76-dc99-44ea-b0ae-064d13333a50",
+  "reason":"user_interrupt"
+}
+```
+
+收到后立即清空缓冲。
+
+### 4.8 三轮完成
+
+三轮表示 3 次有效用户发言，不含开场白。第三轮晚安日记持久化后收到：
+
+```json
+{
+  "type":"conversation.completed",
+  "completedTurns":3,
+  "journalId":"6d1e52fc-46ec-447c-89c6-21a021fb1fb9",
+  "guidance":"breathing_46"
+}
+```
+
+随后自动开始引导。
+
+### 4.9 白噪音（T5 内置）
+
+```json
+{"type":"guidance.start","guidance":"rain","source":"device","durationMinutes":20}
+```
+
+- `rain`、`brown_noise` 必须内置为可无缝循环资源。
+- 按 `durationMinutes` 在本地停止。
+- 短按立即停止。
+- `breathing_46` 不使用内置资源，由后端按 `kind=guidance` 流式发送 PCM。
+- `silence` 不发送音频。
+
+### 4.10 错误
+
+```json
+{
+  "type":"error",
+  "code":"asr_unavailable",
+  "message":"语音识别暂时不可用，请重新说一次",
+  "retryable":true,
+  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"
+}
+```
+
+| code | 是否重试 | 固件行为 |
+|---|---:|---|
+| `speech_not_configured` | 否 | 停止语音流程并上报配置故障 |
+| `invalid_phase` | 否 | 刷新连接或等待真实状态变化 |
+| `invalid_event` | 否 | 记录协议错误，修复固件 |
+| `invalid_audio_frame` | 是 | 检查必须为 960 bytes |
+| `turn_in_progress` | 是 | 不并发开始第二轮 |
+| `turn_too_long` | 是 | 结束采集，提示重新简短表达 |
+| `conversation_limit` | 否 | 等待引导 |
+| `asr_unavailable` | 是 | 用户重新说一次 |
+| `empty_transcript` | 是 | 用户重新说一次 |
+| `ai_unavailable` | 是 | 保留连接，稍后重试同一 `turnId` |
+| `tts_unavailable` | 是 | 不阻塞晚安日记，允许后续流程 |
+| `device_too_slow` | 是 | 缩短本地处理路径并重连 |
+
+## 5. 断线与幂等
+
+- `input.end` 前断线：后端丢弃本轮；重连后使用新 `turnId` 重说。
+- `input.end` 后超时且结果不确定：重连后可复用相同 `turnId`；后端以 `clientRequestId` 防止重复增加轮数。
+- `session.ready.completedTurns` 和 `phase` 来自数据库。
+- 后端重启不恢复半段 PCM；已经持久化的 turn 不重复调用 Claude。
+- 每个控制动作生成唯一 `eventId`；同一动作网络重试复用原 ID。
+
+## 6. Heartbeat
+
+每 30–60 秒及网络恢复后调用：
+
+```http
+POST https://bm.lg.gl/api/v1/device/heartbeat
+Content-Type: application/json
+
+{
+  "deviceId":"expo-device-001",
+  "userId":"expo-user-001",
+  "firmwareVersion":"1.1.0",
+  "capabilities":{
+    "voiceWebSocket":true,
+    "pcm24000Mono":true,
+    "audioPlayback":true,
+    "sunrise":true,
+    "builtInGuidance":["rain","brown_noise"]
+  },
+  "status":{"boxClosed":true,"audioPlaying":false},
+  "localTime":"2026-07-24T22:30:00+08:00"
+}
+```
+
+最近 90 秒收到 heartbeat 或设备事件时，后端认为设备 online。
+
+## 7. 持久设备事件
 
 ```http
 POST https://bm.lg.gl/api/v1/device/events
 Content-Type: application/json
-```
 
-请求：
-
-```json
 {
-  "eventId": "2f83458a-caa1-4ef0-a78f-d3d2810254de",
-  "deviceId": "expo-device-001",
-  "userId": "expo-user-001",
-  "type": "box_closed",
-  "payload": {},
-  "occurredAt": "2026-07-23T14:30:00Z"
+  "eventId":"2f83458a-caa1-4ef0-a78f-d3d2810254de",
+  "deviceId":"expo-device-001",
+  "userId":"expo-user-001",
+  "type":"box_closed",
+  "payload":{},
+  "occurredAt":"2026-07-24T14:30:00Z"
 }
 ```
 
-字段：
+| type | 场景 | 行为 |
+|---|---|---|
+| `box_closed` | 仓盖稳定关闭 | 进入或恢复 `LOCKED` 等阶段；随后连接 Voice WebSocket |
+| `box_opened` | 仓盖稳定打开 | 进入 `PHONE_REMOVED`，停止实时播放 |
+| `soft_button/short_press` | 非语音连接或晨光兼容事件 | 晨光中贪睡；其他阶段停止音频 |
+| `soft_button/long_press` | `SUNRISE` | 标记起床并产生 `alarm.stop` |
+| `alarm_start` | 本地 RTC 到点 | 进入 `SUNRISE` |
 
-| 字段 | 必填 | 类型 | 说明 |
-|---|---:|---|---|
-| `eventId` | 是 | string | **全局唯一且用于幂等**，推荐 UUID v4 |
-| `deviceId` | 是 | string | 当前硬件的固定设备 ID |
-| `userId` | 建议必填 | string | 当前绑定用户；省略时后端使用默认 Demo 用户 |
-| `type` | 是 | string | 事件类型，见下表 |
-| `payload` | 否 | object | P0 可传 `{}`，为后续硬件数据预留 |
-| `occurredAt` | 否 | RFC 3339 | 事件在设备上实际发生的时间；省略时以后端接收时间为准 |
+重要：
 
-成功响应：
+- `CONVERSATION` 中长按说话不用 REST `soft_button/long_press`，必须使用 Voice WebSocket 的 `input.start`/`input.end`。
+- `SUNRISE` 中长按仍上报 REST `soft_button/long_press`。
+- 固件必须根据本地模式和 `session.ready.phase` 区分语义。
+- 仓盖去抖建议 300–500 ms；同一次物理事件重试复用 `eventId`。
+- 事件响应中的 `commands` 不直接执行；统一通过命令队列领取，避免重复执行。
 
-```json
-{
-  "duplicate": false,
-  "tonight": {
-    "id": "42a74f79-f7f7-43fc-91c9-9b6bf6db1192",
-    "date": "2026-07-23",
-    "phase": "LOCKED",
-    "bedtime": "23:00",
-    "wakeTime": "07:30",
-    "conversationTurns": 0,
-    "audioPlaying": false,
-    "pausedForTonight": false,
-    "device": {"boxClosed": true},
-    "sunrise": {"progress": 0},
-    "latestAIDraft": {}
-  },
-  "commands": [
-    {
-      "id": "9b5a6fea-d00a-4fb7-b35a-70a0e23b40ee",
-      "deviceId": "expo-device-001",
-      "type": "audio.confirm",
-      "payload": {"message": "手机已经安放好了"},
-      "status": "pending",
-      "createdAt": "2026-07-23T14:30:00Z"
-    }
-  ]
-}
-```
+## 8. 命令队列
 
-> **重要：不要直接执行事件响应中的 `commands`。** 这些命令已经进入后端命令队列，硬件应统一通过 `/device/commands/next` 领取并执行。否则同一命令会在事件响应和长轮询中各执行一次。
-
-### 4.2 支持的事件
-
-| `type` | 触发条件 | 后端行为 | 可能排队的命令 |
-|---|---|---|---|
-| `box_closed` | 仓盖由开变为关 | 首次锁仓，或从 `PHONE_REMOVED` 恢复 | `audio.confirm`、`led.off` |
-| `box_opened` | 仓盖由关变为开 | 暂停当前音频，状态进入 `PHONE_REMOVED` | `audio.pause` |
-| `soft_button/short_press` | 软按键短按 | 晨光中表示贪睡；其他睡前阶段表示停止音频 | `alarm.snooze` + `led.off`，或 `audio.stop` + `led.off` |
-| `soft_button/long_press` | 软按键长按 | 晨光中表示已起床；其他阶段为无副作用事件 | 晨光中产生 `alarm.stop` |
-| `alarm_start` | 硬件本地闹钟到点 | 后端进入 `SUNRISE` | `sunrise.start` |
-
-### 4.3 仓盖事件要求
-
-- 只在仓盖稳定状态发生**边沿变化**时上报。
-- 建议固件去抖 300–500 ms。
-- 同一次物理变化的网络重试必须复用同一个 `eventId`。
-- 不能为一次事件的每次重试生成新 `eventId`，否则会造成重复状态迁移或 `409`。
-
-### 4.4 事件幂等与重试
-
-后端以 `eventId` 做唯一约束。同一事件重复上报时返回首次结果，并令：
-
-```json
-{"duplicate": true}
-```
-
-固件建议流程：
-
-1. 物理事件发生时生成一个 UUID v4。
-2. 将完整事件写入本地待发送队列。
-3. 请求成功（HTTP 200）后删除本地事件。
-4. 网络断开、超时或 HTTP 5xx 时，使用**同一个 `eventId`**退避重试。
-5. HTTP 400/404/409 不要无限重试。
-
-推荐退避：`1s → 2s → 4s → 8s → 15s`，之后最多每 30 秒重试一次；设备重新联网后立即恢复队列发送。
-
-## 5. 长轮询领取命令
-
-### 5.1 接口
+领取：
 
 ```http
 GET https://bm.lg.gl/api/v1/device/commands/next?deviceId=expo-device-001&timeoutSec=20
 ```
 
-参数：
+- 200：一条命令。
+- 204：正常空结果，立即发起下一次轮询。
+- 同一设备只能有一个长轮询。
+- `leaseExpiresAt` 前未 ACK 会重投，`attempt` 递增，默认最多 5 次。
+- 固件在 NVS/Flash 保存有限大小的已完成 command ID；重复命令不重复产生副作用，但仍回复 ACK。
 
-| 参数 | 必填 | 说明 |
-|---|---:|---|
-| `deviceId` | 是 | 设备固定 ID |
-| `timeoutSec` | 否 | 长轮询时长，默认 20 秒，最大 30 秒；推荐传 20 |
-
-返回规则：
-
-- HTTP `200`：领取到一条命令，命令状态已经变成 `dispatched`。
-- HTTP `204`：本轮等待期间没有命令，不是错误。
-
-示例：
-
-```json
-{
-  "id": "9b5a6fea-d00a-4fb7-b35a-70a0e23b40ee",
-  "deviceId": "expo-device-001",
-  "type": "audio.play",
-  "payload": {
-    "guidance": "breathing_46"
-  },
-  "status": "dispatched",
-  "createdAt": "2026-07-23T14:31:00Z"
-}
-```
-
-### 5.2 固件轮询要求
-
-- 每台设备同一时间只能保持 **1 个** `/commands/next` 请求，禁止并行长轮询。
-- HTTP 客户端读超时应大于 `timeoutSec`，推荐 `25–30s`。
-- 收到 `204` 后可立即发起下一次请求，不需要额外等待。
-- 网络失败后使用 1–5 秒退避，避免离线期间高速重连。
-- 收到 `200` 后：校验 `deviceId` → 根据 `type` 执行 → 调 ACK → 再领取下一条。
-- 单条命令执行失败也必须 ACK，并设置 `success=false`；不要因一条命令失败而永久阻塞队列。
-
-参考伪代码：
-
-```text
-while device_is_running:
-    response = GET /device/commands/next?deviceId=...&timeoutSec=20
-
-    if response.status == 204:
-        continue
-
-    if response.status == 200:
-        command = response.json
-        result = execute(command.type, command.payload)
-        retry_same_ack_until_resolved(command.id, result)
-        continue
-
-    sleep(with_backoff)
-```
-
-## 6. 命令类型与硬件行为
-
-| 命令 `type` | `payload` 示例 | 硬件期望行为 |
-|---|---|---|
-| `audio.confirm` | `{"message":"手机已经安放好了"}` | 播放内置“手机已经安放好了”确认音；支持 TTS 时可使用 `message` |
-| `audio.play` | `{"guidance":"rain"}` | 播放指定睡眠引导音频，循环/时长由当前固件策略控制 |
-| `audio.pause` | `{}` | 立即暂停当前引导或白噪音，保留可恢复的播放位置 |
-| `audio.stop` | `{}` | 立即停止并重置当前音频播放 |
-| `led.off` | `{}` | 关闭非必要 LED/灯效，进入低刺激黑暗状态 |
-| `sunrise.start` | `{"durationMinutes":25}` | 从最低亮度开始执行 25 分钟渐亮晨光；具体曲线由固件实现 |
-| `alarm.snooze` | `{"minutes":5}` | 停止当前闹铃/晨光并在设备本地安排 5 分钟后再次触发 |
-| `alarm.stop` | `{}` | 停止闹铃、晨光与相关音频，退出唤醒流程 |
-
-### 6.1 `audio.play` 的 guidance 值
-
-| 值 | 含义 |
-|---|---|
-| `rain` | 雨声 |
-| `brown_noise` | 棕色噪音 |
-| `breathing_46` | 4 秒吸气、6 秒呼气的呼吸引导 |
-
-用户选择 `silence` 时，后端不会下发 `audio.play`，而会下发 `audio.stop` 和 `led.off`。
-
-### 6.2 贪睡的本地职责
-
-P0 后端没有后台闹钟调度器。因此收到：
-
-```json
-{"type":"alarm.snooze","payload":{"minutes":5}}
-```
-
-硬件必须在本地 RTC/定时器中安排 5 分钟。时间到后再次上报一个具有新 `eventId` 的 `alarm_start`，再由后端返回后续 `sunrise.start` 命令。
-
-若网络暂时不可用，建议硬件仍按本地兜底策略启动基础闹铃，联网后补报 `alarm_start`；不能因为后端不可达而完全跳过用户闹钟。
-
-## 7. ACK 命令执行结果
-
-### 7.1 接口
+ACK：
 
 ```http
 POST https://bm.lg.gl/api/v1/device/commands/ack
 Content-Type: application/json
-```
 
-成功 ACK：
-
-```json
 {
-  "deviceId": "expo-device-001",
-  "commandId": "9b5a6fea-d00a-4fb7-b35a-70a0e23b40ee",
-  "success": true,
-  "payload": {
-    "durationMs": 138,
-    "firmwareVersion": "0.1.0"
-  }
+  "deviceId":"expo-device-001",
+  "commandId":"9b5a6fea-d00a-4fb7-b35a-70a0e23b40ee",
+  "success":true,
+  "payload":{"firmwareVersion":"1.1.0","durationMs":138}
 }
 ```
 
-失败 ACK：
+常见命令：`audio.confirm`、`audio.play`、`audio.pause`、`audio.stop`、`led.off`、`sunrise.start`、`alarm.snooze`、`alarm.stop`。实时 Claude 回复和呼吸引导不经过命令队列。
 
-```json
-{
-  "deviceId": "expo-device-001",
-  "commandId": "9b5a6fea-d00a-4fb7-b35a-70a0e23b40ee",
-  "success": false,
-  "payload": {
-    "errorCode": "AUDIO_ASSET_NOT_FOUND",
-    "message": "breathing_46 asset is missing"
-  }
-}
-```
+## 9. 完整睡前流程
 
-字段：
+1. T5 heartbeat。
+2. 用户放入手机并闭仓。
+3. T5 POST `box_closed`。
+4. T5 建立 Device Voice WebSocket。
+5. 收到 `session.ready` 后发送 `session.start`。
+6. T5 边收边播开场白。
+7. 用户长按，T5 发送 `input.start` 和 PCM；松开发送 `input.end`。
+8. T5 收到 Claude reply PCM 并边收边播。
+9. 重复至 3 次有效用户发言。
+10. 收到 `conversation.completed`。
+11. 收到 `guidance.start` 播放内置白噪音，或接收 `kind=guidance` 的呼吸 PCM。
+12. 短按可随时本地停止声音。
+13. 开仓时 POST `box_opened` 并断开或暂停语音连接。
 
-| 字段 | 必填 | 说明 |
-|---|---:|---|
-| `deviceId` | 是 | 必须与领取命令时的设备 ID 一致 |
-| `commandId` | 是 | 命令响应中的 `id` |
-| `success` | 是 | 命令是否成功完成 |
-| `payload` | 否 | 可放执行耗时、固件版本、错误码等诊断信息；不得放密钥 |
+## 10. 晨光流程
 
-ACK 是幂等的。若 ACK 请求超时或响应丢失，可以用相同的 `deviceId`、`commandId` 和结果重复发送。
+1. 本地 RTC 到点，POST `alarm_start`。
+2. 领取并 ACK `sunrise.start`。
+3. 短按：POST `soft_button/short_press`，领取 `alarm.snooze`，本地安排 5 分钟。
+4. 长按：POST `soft_button/long_press`，领取 `alarm.stop`。
+5. 断网时本地闹钟仍必须可用。
 
-> 当前 P0 命令在被领取时即标记为 `dispatched`，没有超时自动重新投递机制。因此固件应在本地暂存“待 ACK 命令”，直到收到 ACK 的 HTTP 200；收到命令后也不要在 ACK 前重启或清空执行记录。
+## 11. 固件状态建议
 
-## 8. 推荐的设备状态与持久化数据
-
-固件至少持久化：
+持久化：
 
 ```text
 device_id
 bound_user_id
 firmware_version
-pending_event_queue[]     // 等待后端确认的事件，含固定 eventId
-pending_ack               // 已执行但尚未得到 ACK 200 的命令及执行结果
-local_alarm/snooze_state  // 本地 RTC 闹钟与贪睡状态
+pending_event_queue[]
+completed_command_ids[]
+pending_ack
+local_alarm/snooze_state
 ```
 
-建议内存状态：
+内存：
 
 ```text
-box_state: open | closed | unknown
-current_audio: none | paused | rain | brown_noise | breathing_46
-sunrise_active: bool
-last_command_id: UUID
-network_backoff: duration
+voice_ws_state
+server_phase
+current_turn_id
+current_playback_id
+capture_ring_buffer
+playback_ring_buffer
+input_active
+audio_playing
+box_state
+network_backoff
 ```
 
-## 9. 完整联调流程
+不得持久化完整录音、`transcript.final.text`、Claude 回复全文、火山引擎 App ID/Access Token 或 Claude Token。
 
-### 9.1 睡前流程
+## 12. 联调验收清单
 
-1. 硬件启动并使用 `deviceId` 开始长轮询。
-2. 用户将手机放入设备并闭仓。
-3. 硬件上报 `box_closed`。
-4. 后端更新状态并排队 `audio.confirm`、`led.off`。
-5. 硬件依次领取命令，执行并 ACK。
-6. APP 完成 AI 倾诉并选择引导方式。
-7. 硬件领取 `audio.play`，开始播放雨声/棕色噪音/呼吸引导。
-8. 用户开仓时，硬件上报 `box_opened`，随后领取 `audio.pause`。
-9. 用户重新闭仓时，再上报新的 `box_closed` 事件。
+- [ ] `deviceId` 重启后不变，Android 和 T5 使用相同 `userId`。
+- [ ] PCM 采集和播放均为 24kHz/16-bit/mono/little-endian。
+- [ ] 每条上行 binary message 恰好 960 bytes。
+- [ ] 播放缓冲为 100–300 ms 且有界。
+- [ ] 长按开始、松开结束；单次 60 秒自动结束。
+- [ ] 短按无需等待网络即可立即静音。
+- [ ] 播放中长按能清空旧音频并开始新输入。
+- [ ] 断线重连并正确处理 `session.ready`。
+- [ ] 相同 `turnId` 重试不会增加两轮。
+- [ ] 三轮后收到 `conversation.completed`。
+- [ ] `rain`、`brown_noise` 内置且按时长停止。
+- [ ] 呼吸引导可以边收边播。
+- [ ] REST 事件幂等；command 按 ID 去重并 ACK。
+- [ ] 晨光模式和 Conversation 模式的长按语义正确区分。
+- [ ] 日志中无音频、转写全文和凭证。
 
-### 9.2 晨光与起床流程
-
-1. 设备本地 RTC 到达起床时间，上报 `alarm_start`。
-2. 硬件领取 `sunrise.start {durationMinutes:25}` 并开始渐亮。
-3. 用户短按：上报 `soft_button/short_press`。
-4. 硬件领取 `alarm.snooze {minutes:5}` 和 `led.off`，在本地设置 5 分钟定时器。
-5. 贪睡到时：上报新的 `alarm_start`，重新领取 `sunrise.start`。
-6. 用户长按：上报 `soft_button/long_press`。
-7. 硬件领取 `alarm.stop`，结束唤醒流程。
-
-## 10. cURL 联调示例
-
-以下变量仅用于联调：
-
-```bash
-BASE_URL='https://bm.lg.gl/api/v1'
-DEVICE_ID='expo-device-001'
-USER_ID='expo-user-001'
-```
-
-### 10.1 上报闭仓
-
-```bash
-curl --fail-with-body -X POST "$BASE_URL/device/events" \
-  -H 'Content-Type: application/json' \
-  --data "{
-    \"eventId\":\"$(uuidgen)\",
-    \"deviceId\":\"$DEVICE_ID\",
-    \"userId\":\"$USER_ID\",
-    \"type\":\"box_closed\",
-    \"payload\":{}
-  }"
-```
-
-### 10.2 领取下一条命令
-
-```bash
-curl -i "$BASE_URL/device/commands/next?deviceId=$DEVICE_ID&timeoutSec=20"
-```
-
-### 10.3 ACK 命令
-
-```bash
-curl --fail-with-body -X POST "$BASE_URL/device/commands/ack" \
-  -H 'Content-Type: application/json' \
-  --data "{
-    \"deviceId\":\"$DEVICE_ID\",
-    \"commandId\":\"<上一步返回的命令 id>\",
-    \"success\":true,
-    \"payload\":{\"firmwareVersion\":\"0.1.0\"}
-  }"
-```
-
-## 11. 联调验收清单
-
-- [ ] `deviceId` 重启后保持不变。
-- [ ] 仓盖事件已做去抖，只上报稳定的边沿变化。
-- [ ] 每个新物理事件生成新的 UUID；同一事件重试复用 UUID。
-- [ ] 事件响应中的 `commands` 不被直接执行。
-- [ ] 每台设备只有一个长轮询请求。
-- [ ] HTTP 204 被当作正常空结果处理。
-- [ ] 所有领取到的命令均产生成功或失败 ACK。
-- [ ] ACK 网络失败时可在重启后继续重试。
-- [ ] 未知命令不会导致固件崩溃，而是以 `success=false` ACK。
-- [ ] `alarm.snooze` 使用本地 RTC/定时器实现。
-- [ ] 断网时闹钟有本地兜底，不依赖云端才能响。
-- [ ] 日志中不记录未来增加的设备密钥或其他敏感信息。
-
-## 12. P0 已知边界
-
-- 设备接口暂未启用正式认证。
-- 一个命令领取后不会自动超时重投，当前投递语义接近 at-most-once。
-- 后端不负责真实闹钟和贪睡定时，硬件必须本地调度。
-- 当前没有设备注册、解绑、OTA、心跳、时钟同步、遥测和固件版本策略接口。
-- 当前没有晨光进度上报接口，渐亮曲线与实时进度由硬件本地维护。
-
-完整机器可读契约见仓库中的 [`api/openapi.yaml`](../api/openapi.yaml)。若实现与本文档出现冲突，以联调时确认的后端版本和 OpenAPI 为准。
+机器可读 REST/upgrade 契约见 [`api/openapi.yaml`](../api/openapi.yaml)；完整语音设计见 [`voice-streaming-design.md`](voice-streaming-design.md)。若摘要冲突，以语音设计文档中的冻结协议为准。

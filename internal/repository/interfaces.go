@@ -20,11 +20,20 @@ type Store interface {
 	CreateConversationTurn(ctx context.Context, turn *model.ConversationTurn) error
 	ListConversationTurns(ctx context.Context, sessionID uuid.UUID) ([]model.ConversationTurn, error)
 	GetLatestUserTurn(ctx context.Context, sessionID uuid.UUID) (*model.ConversationTurn, error)
+	GetConversationTurnByClientRequestID(ctx context.Context, sessionID uuid.UUID, clientRequestID, role string) (*model.ConversationTurn, error)
+	DeleteConversationTurns(ctx context.Context, sessionID uuid.UUID) error
 	UpsertMemoryCard(ctx context.Context, card *model.MemoryCard) error
 	ListMemoryCards(ctx context.Context, userID string, limit int) ([]model.MemoryCard, error)
+	GetMemoryCard(ctx context.Context, userID string, cardID uuid.UUID, forUpdate bool) (*model.MemoryCard, error)
+	UpdateMemoryCard(ctx context.Context, card *model.MemoryCard) error
+	DeleteMemoryCard(ctx context.Context, userID string, cardID uuid.UUID) error
+	GetNightSessionByID(ctx context.Context, sessionID uuid.UUID, forUpdate bool) (*model.NightSession, error)
+	ListDueNightSessionIDs(ctx context.Context, now time.Time, limit int) ([]uuid.UUID, error)
 	GetDeviceEventByEventID(ctx context.Context, eventID string) (*model.DeviceEvent, error)
 	CreateDeviceEvent(ctx context.Context, event *model.DeviceEvent) error
 	CreateDeviceCommands(ctx context.Context, commands []model.DeviceCommand) error
-	TakeNextDeviceCommand(ctx context.Context, deviceID string) (*model.DeviceCommand, error)
+	TakeNextDeviceCommand(ctx context.Context, deviceID string, lease time.Duration, maxAttempts int) (*model.DeviceCommand, error)
 	AckDeviceCommand(ctx context.Context, deviceID string, commandID uuid.UUID, success bool, payload []byte) (*model.DeviceCommand, error)
+	UpsertDevice(ctx context.Context, device *model.Device) error
+	GetDevice(ctx context.Context, userID, deviceID string) (*model.Device, error)
 }

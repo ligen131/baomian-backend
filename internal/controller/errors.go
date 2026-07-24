@@ -28,7 +28,7 @@ func respondError(c *gin.Context, err error) {
 	switch serviceErr.Code {
 	case "validation_error":
 		status = http.StatusBadRequest
-	case "invalid_transition", "conversation_limit":
+	case "invalid_transition", "conversation_limit", "conversation_expired", "request_in_progress", "journal_not_deletable":
 		status = http.StatusConflict
 	case "not_found":
 		status = http.StatusNotFound

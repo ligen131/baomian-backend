@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/baomian/baomian-backend/internal/dto"
+	"github.com/baomian/baomian-backend/internal/metrics"
 	"github.com/baomian/baomian-backend/internal/realtime"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -18,13 +19,14 @@ const (
 
 type WebSocketController struct {
 	hub         *realtime.Hub
+	metrics     *metrics.Registry
 	defaultUser string
 	upgrader    websocket.Upgrader
 }
 
-func NewWebSocketController(hub *realtime.Hub, defaultUser string) *WebSocketController {
+func NewWebSocketController(hub *realtime.Hub, registry *metrics.Registry, defaultUser string) *WebSocketController {
 	return &WebSocketController{
-		hub: hub, defaultUser: defaultUser,
+		hub: hub, metrics: registry, defaultUser: defaultUser,
 		upgrader: websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }},
 	}
 }
@@ -40,7 +42,9 @@ func (h *WebSocketController) Connect(c *gin.Context) {
 	}
 	client := &realtime.Client{UserID: userID, Send: make(chan dto.WSEvent, 32)}
 	h.hub.Register(client)
+	disconnected := h.metrics.WebSocketConnected()
 	defer func() {
+		disconnected()
 		h.hub.Unregister(client)
 		_ = connection.Close()
 	}()

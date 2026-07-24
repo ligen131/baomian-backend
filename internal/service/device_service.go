@@ -15,14 +15,35 @@ import (
 )
 
 type DeviceService struct {
-	store       repository.Store
-	hub         *realtime.Hub
-	defaultUser string
-	now         func() time.Time
+	store                      repository.Store
+	hub                        *realtime.Hub
+	defaultUser                string
+	commandLease               time.Duration
+	commandMaxAttempts         int
+	conversationSilenceTimeout time.Duration
+	conversationMaxDuration    time.Duration
+	phoneRemovedResumeWindow   time.Duration
+	now                        func() time.Time
 }
 
-func NewDeviceService(store repository.Store, hub *realtime.Hub, defaultUser string) *DeviceService {
-	return &DeviceService{store: store, hub: hub, defaultUser: defaultUser, now: time.Now}
+func NewDeviceService(
+	store repository.Store,
+	hub *realtime.Hub,
+	defaultUser string,
+	commandLease time.Duration,
+	commandMaxAttempts int,
+	conversationSilenceTimeout time.Duration,
+	conversationMaxDuration time.Duration,
+	phoneRemovedResumeWindow time.Duration,
+) *DeviceService {
+	return &DeviceService{
+		store: store, hub: hub, defaultUser: defaultUser,
+		commandLease: commandLease, commandMaxAttempts: commandMaxAttempts,
+		conversationSilenceTimeout: conversationSilenceTimeout,
+		conversationMaxDuration:    conversationMaxDuration,
+		phoneRemovedResumeWindow:   phoneRemovedResumeWindow,
+		now:                        time.Now,
+	}
 }
 
 func (s *DeviceService) HandleEvent(ctx context.Context, request dto.DeviceEventRequest) (dto.DeviceEventResponse, error) {
@@ -50,13 +71,32 @@ func (s *DeviceService) HandleEvent(ctx context.Context, request dto.DeviceEvent
 		if err != nil {
 			return err
 		}
-		session, err := tx.GetOrCreateTonight(ctx, userID, occurredAt, true)
+		device, err := tx.GetDevice(ctx, userID, request.DeviceID)
+		if errors.Is(err, repository.ErrNotFound) {
+			device = &model.Device{
+				DeviceID: request.DeviceID, UserID: userID,
+				Capabilities: model.JSON(map[string]any{}), Status: model.JSON(map[string]any{}),
+			}
+		} else if err != nil {
+			return err
+		}
+		device.LastSeenAt = s.now().UTC()
+		if err := tx.UpsertDevice(ctx, device); err != nil {
+			return err
+		}
+		session, err := tx.GetOrCreateTonight(ctx, userID, profileDate(occurredAt, profile.TimeZone), true)
 		if err != nil {
 			return err
 		}
 		trigger, err := deviceTrigger(request.Type, session.Phase)
 		if err != nil {
 			return err
+		}
+		previousPhase := session.Phase
+		resumeExpired := trigger == state.BoxClosed && session.Phase == string(state.PhoneRemoved) &&
+			(session.ResumeDeadlineAt == nil || !s.now().UTC().Before(*session.ResumeDeadlineAt))
+		if resumeExpired {
+			session.ResumePhase = ""
 		}
 		next, err := state.Apply(snapshot(session), trigger)
 		if err != nil {
@@ -66,6 +106,13 @@ func (s *DeviceService) HandleEvent(ctx context.Context, request dto.DeviceEvent
 			return err
 		}
 		applySnapshot(session, next)
+		applySessionTiming(
+			session, previousPhase, trigger, s.now().UTC(),
+			s.conversationSilenceTimeout, s.conversationMaxDuration, s.phoneRemovedResumeWindow,
+		)
+		if resumeExpired {
+			session.PausedForTonight = true
+		}
 		commands := deviceCommands(userID, request.DeviceID, request.Type, state.Phase(session.Phase))
 		if err := tx.UpdateNightSession(ctx, session); err != nil {
 			return err
@@ -103,6 +150,36 @@ func (s *DeviceService) HandleEvent(ctx context.Context, request dto.DeviceEvent
 	return response, nil
 }
 
+func (s *DeviceService) Heartbeat(ctx context.Context, request dto.DeviceHeartbeatRequest) (dto.DeviceStatus, error) {
+	userID := request.UserID
+	if userID == "" {
+		userID = s.defaultUser
+	}
+	now := s.now().UTC()
+	device := &model.Device{
+		DeviceID: request.DeviceID, UserID: userID, FirmwareVersion: request.FirmwareVersion,
+		Capabilities: model.JSON(request.Capabilities), Status: model.JSON(request.Status),
+		LocalTime: request.LocalTime, LastSeenAt: now,
+	}
+	if err := s.store.UpsertDevice(ctx, device); err != nil {
+		return dto.DeviceStatus{}, NewError("storage_error", "更新设备在线状态失败", err)
+	}
+	result := dto.DeviceStatusFromModel(device, 90*time.Second, now)
+	publish(s.hub, userID, "device.status", result)
+	return result, nil
+}
+
+func (s *DeviceService) Status(ctx context.Context, userID, deviceID string) (dto.DeviceStatus, error) {
+	device, err := s.store.GetDevice(ctx, userID, deviceID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return dto.DeviceStatus{}, NewError("not_found", "设备不存在", err)
+	}
+	if err != nil {
+		return dto.DeviceStatus{}, NewError("storage_error", "读取设备状态失败", err)
+	}
+	return dto.DeviceStatusFromModel(device, 90*time.Second, s.now().UTC()), nil
+}
+
 func (s *DeviceService) NextCommand(ctx context.Context, deviceID string, timeout time.Duration) (*dto.Command, error) {
 	if timeout <= 0 {
 		timeout = 20 * time.Second
@@ -115,7 +192,7 @@ func (s *DeviceService) NextCommand(ctx context.Context, deviceID string, timeou
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		command, err := s.store.TakeNextDeviceCommand(ctx, deviceID)
+		command, err := s.store.TakeNextDeviceCommand(ctx, deviceID, s.commandLease, s.commandMaxAttempts)
 		if err == nil {
 			converted := dto.CommandFromModel(command)
 			return &converted, nil

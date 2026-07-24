@@ -15,6 +15,29 @@ func NewConversationController(value *service.ConversationService) *Conversation
 	return &ConversationController{service: value}
 }
 
+func (h *ConversationController) History(c *gin.Context) {
+	result, err := h.service.History(c.Request.Context(), middleware.UserID(c))
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *ConversationController) Activity(c *gin.Context) {
+	var request dto.ConversationActivityRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		respondBindingError(c, err)
+		return
+	}
+	result, err := h.service.Activity(c.Request.Context(), middleware.UserID(c), request)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
 func (h *ConversationController) Turn(c *gin.Context) {
 	var request dto.ConversationTurnRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
