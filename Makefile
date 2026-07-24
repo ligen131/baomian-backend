@@ -1,4 +1,4 @@
-.PHONY: tidy fmt test race migrate-up migrate-down run restart compose-up compose-down smoke backup restore
+.PHONY: tidy fmt test race migrate-up migrate-down run restart reset-test-session compose-up compose-down smoke backup restore
 
 tidy:
 	go mod tidy
@@ -23,6 +23,9 @@ run:
 
 restart:
 	./scripts/restart-from-source.sh
+
+reset-test-session:
+	./scripts/reset-test-session.sh --user "$(USER_ID)" --device "$(DEVICE_ID)"
 
 compose-up:
 	docker compose up --build -d

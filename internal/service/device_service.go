@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/baomian/baomian-backend/internal/dto"
@@ -23,6 +24,7 @@ type DeviceService struct {
 	conversationSilenceTimeout time.Duration
 	conversationMaxDuration    time.Duration
 	phoneRemovedResumeWindow   time.Duration
+	logger                     *slog.Logger
 	now                        func() time.Time
 }
 
@@ -35,13 +37,19 @@ func NewDeviceService(
 	conversationSilenceTimeout time.Duration,
 	conversationMaxDuration time.Duration,
 	phoneRemovedResumeWindow time.Duration,
+	logger ...*slog.Logger,
 ) *DeviceService {
+	var serviceLogger *slog.Logger
+	if len(logger) > 0 {
+		serviceLogger = logger[0]
+	}
 	return &DeviceService{
 		store: store, hub: hub, defaultUser: defaultUser,
 		commandLease: commandLease, commandMaxAttempts: commandMaxAttempts,
 		conversationSilenceTimeout: conversationSilenceTimeout,
 		conversationMaxDuration:    conversationMaxDuration,
 		phoneRemovedResumeWindow:   phoneRemovedResumeWindow,
+		logger:                     serviceLogger,
 		now:                        time.Now,
 	}
 }
@@ -88,32 +96,39 @@ func (s *DeviceService) HandleEvent(ctx context.Context, request dto.DeviceEvent
 		if err != nil {
 			return err
 		}
-		trigger, err := deviceTrigger(request.Type, session.Phase)
-		if err != nil {
-			return err
-		}
-		previousPhase := session.Phase
-		resumeExpired := trigger == state.BoxClosed && session.Phase == string(state.PhoneRemoved) &&
-			(session.ResumeDeadlineAt == nil || !s.now().UTC().Before(*session.ResumeDeadlineAt))
-		if resumeExpired {
-			session.ResumePhase = ""
-		}
-		next, err := state.Apply(snapshot(session), trigger)
-		if err != nil {
-			if errors.Is(err, state.ErrInvalidTransition) {
-				return &Error{Code: "invalid_transition", Message: "当前状态不接受此设备事件", Details: map[string]any{"phase": session.Phase, "eventType": request.Type}, Cause: err}
+		commands := []model.DeviceCommand(nil)
+		if idempotentBoxClosed(request.Type, session) {
+			if s.logger != nil {
+				s.logger.InfoContext(ctx, "device state event already satisfied", "eventId", request.EventID, "deviceId", request.DeviceID, "phase", session.Phase, "eventType", request.Type)
 			}
-			return err
+		} else {
+			trigger, err := deviceTrigger(request.Type, session.Phase)
+			if err != nil {
+				return err
+			}
+			previousPhase := session.Phase
+			resumeExpired := trigger == state.BoxClosed && session.Phase == string(state.PhoneRemoved) &&
+				(session.ResumeDeadlineAt == nil || !s.now().UTC().Before(*session.ResumeDeadlineAt))
+			if resumeExpired {
+				session.ResumePhase = ""
+			}
+			next, err := state.Apply(snapshot(session), trigger)
+			if err != nil {
+				if errors.Is(err, state.ErrInvalidTransition) {
+					return &Error{Code: "invalid_transition", Message: "当前状态不接受此设备事件", Details: map[string]any{"phase": session.Phase, "eventType": request.Type}, Cause: err}
+				}
+				return err
+			}
+			applySnapshot(session, next)
+			applySessionTiming(
+				session, previousPhase, trigger, s.now().UTC(),
+				s.conversationSilenceTimeout, s.conversationMaxDuration, s.phoneRemovedResumeWindow,
+			)
+			if resumeExpired {
+				session.PausedForTonight = true
+			}
+			commands = deviceCommands(userID, request.DeviceID, request.Type, state.Phase(session.Phase))
 		}
-		applySnapshot(session, next)
-		applySessionTiming(
-			session, previousPhase, trigger, s.now().UTC(),
-			s.conversationSilenceTimeout, s.conversationMaxDuration, s.phoneRemovedResumeWindow,
-		)
-		if resumeExpired {
-			session.PausedForTonight = true
-		}
-		commands := deviceCommands(userID, request.DeviceID, request.Type, state.Phase(session.Phase))
 		if err := tx.UpdateNightSession(ctx, session); err != nil {
 			return err
 		}
@@ -223,6 +238,18 @@ func (s *DeviceService) Ack(ctx context.Context, request dto.CommandAckRequest) 
 		return dto.Command{}, NewError("storage_error", "确认设备命令失败", err)
 	}
 	return dto.CommandFromModel(command), nil
+}
+
+func idempotentBoxClosed(eventType string, session *model.NightSession) bool {
+	if eventType != "box_closed" || !session.BoxClosed {
+		return false
+	}
+	switch state.Phase(session.Phase) {
+	case state.Locked, state.Conversation, state.ChoosingGuidance, state.Sleeping:
+		return true
+	default:
+		return false
+	}
 }
 
 func deviceTrigger(eventType, currentPhase string) (state.Trigger, error) {

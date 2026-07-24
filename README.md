@@ -113,6 +113,26 @@ go run ./cmd/server
 go run ./cmd/migrate down
 ```
 
+### 硬件联调：预览或重置今晚测试状态
+
+固定使用同一 `userId` / `deviceId` 联调时，后端会按设计恢复当天 NightSession。服务器本机可先预览将受影响的数据：
+
+```bash
+make reset-test-session USER_ID=expo-user-001 DEVICE_ID=expo-device-001
+```
+
+该命令默认只读，不会修改数据库。确认需要重新开始今晚流程时，必须直接调用脚本并提供双重确认：
+
+```bash
+./scripts/reset-test-session.sh \
+  --user expo-user-001 \
+  --device expo-device-001 \
+  --apply \
+  --confirm RESET-TONIGHT
+```
+
+脚本只删除指定测试身份当天的 NightSession（对话与记忆卡由外键级联删除）以及当天未完成的设备命令；保留 Profile、Device、历史日期、已完成命令和 DeviceEvent 审计。它仅供服务器本机联调，不开放公网 API，也不属于正式用户功能。
+
 ## Claude 与降级策略
 
 调用链：

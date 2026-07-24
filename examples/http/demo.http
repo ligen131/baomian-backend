@@ -120,11 +120,17 @@ Content-Type: application/json
 GET {{baseUrl}}/api/v1/devices/{{deviceId}}/status
 X-Demo-User-Id: {{userId}}
 
-### 设备事件
+### 设备事件；同 eventId 重试返回 duplicate=true
 POST {{baseUrl}}/api/v1/device/events
 Content-Type: application/json
 
 {"eventId":"{{$uuid}}","deviceId":"{{deviceId}}","userId":"{{userId}}","type":"box_opened","payload":{}}
+
+### 重复闭仓状态；即使使用新 eventId，也返回 200 且 commands=[]，不重复确认音
+POST {{baseUrl}}/api/v1/device/events
+Content-Type: application/json
+
+{"eventId":"{{$uuid}}","deviceId":"{{deviceId}}","userId":"{{userId}}","type":"box_closed","payload":{}}
 
 ### 领取设备命令；关注 attempt 与 leaseExpiresAt，并按 id 去重
 GET {{baseUrl}}/api/v1/device/commands/next?deviceId={{deviceId}}&timeoutSec=1

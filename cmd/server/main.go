@@ -61,7 +61,7 @@ func main() {
 	)
 	deviceService := service.NewDeviceService(
 		store, hub, cfg.DemoUserID, cfg.DeviceCommandLease, cfg.DeviceCommandMaxAttempts,
-		cfg.ConversationSilenceTimeout, cfg.ConversationMaxDuration, cfg.PhoneRemovedResumeWindow,
+		cfg.ConversationSilenceTimeout, cfg.ConversationMaxDuration, cfg.PhoneRemovedResumeWindow, logger,
 	)
 	speechConfig := speech.Config{
 		AppID: cfg.VolcengineSpeechAppID, AccessToken: cfg.VolcengineSpeechAccessToken,

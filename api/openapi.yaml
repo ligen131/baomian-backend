@@ -182,7 +182,7 @@ paths:
       tags: [Device]
       security: []
       summary: 上报 T5 设备事件并刷新 lastSeenAt
-      description: eventId 全局幂等；重复上报返回首次结果并标记 duplicate=true。
+      description: eventId 全局幂等；重复上报返回首次结果并标记 duplicate=true。若设备已处于闭仓状态，使用新 eventId 重复上报 box_closed 也返回当前状态且 commands 为空，不重复播放确认音；真正的状态冲突仍返回 409。
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: "#/components/schemas/DeviceEventRequest"}}}

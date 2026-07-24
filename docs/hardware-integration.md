@@ -320,7 +320,8 @@ Content-Type: application/json
 - `CONVERSATION` 中长按说话不用 REST `soft_button/long_press`，必须使用 Voice WebSocket 的 `input.start`/`input.end`。
 - `SUNRISE` 中长按仍上报 REST `soft_button/long_press`。
 - 固件必须根据本地模式和 `session.ready.phase` 区分语义。
-- 仓盖去抖建议 300–500 ms；同一次物理事件重试复用 `eventId`。
+- 仓盖去抖建议 300–500 ms；同一次物理事件重试复用 `eventId`，此时响应 `duplicate=true`。
+- 如果固件重启或丢失原 `eventId`，在后端已经记录闭仓的稳定阶段再次上报新 `box_closed`，后端也返回 200 和当前状态，但 `commands=[]` 且不会重复播放确认音；真正需要恢复状态时仍执行正常迁移，真正冲突仍返回 409。
 - 事件响应中的 `commands` 不直接执行；统一通过命令队列领取，避免重复执行。
 
 ## 8. 命令队列
@@ -369,7 +370,27 @@ Content-Type: application/json
 12. 短按可随时本地停止声音。
 13. 开仓时 POST `box_opened` 并断开或暂停语音连接。
 
-## 10. 晨光流程
+## 10. 服务器本机测试重置
+
+同一测试 `userId` 在同一天重连时恢复已有 NightSession 是正常行为。需要从 `WAITING_TO_LOCK` 重新跑完整硬件流程时，在后端服务器本机先预览：
+
+```bash
+make reset-test-session USER_ID=expo-user-001 DEVICE_ID=expo-device-001
+```
+
+确认后再显式执行：
+
+```bash
+./scripts/reset-test-session.sh \
+  --user expo-user-001 \
+  --device expo-device-001 \
+  --apply \
+  --confirm RESET-TONIGHT
+```
+
+该脚本不对公网开放，只清理指定测试身份当天的会话、关联对话/记忆卡和未完成设备命令；不会删除 Profile、Device、历史记录、已完成命令或 DeviceEvent 审计。正式用户不使用此脚本。
+
+## 11. 晨光流程
 
 1. 本地 RTC 到点，POST `alarm_start`。
 2. 领取并 ACK `sunrise.start`。
