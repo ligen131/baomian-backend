@@ -58,6 +58,24 @@ func TestLongPressIgnoredOutsideSunrise(t *testing.T) {
 	}
 }
 
+func TestSelectGuidanceRequiresChoosingGuidance(t *testing.T) {
+	if _, err := Apply(Snapshot{Phase: Locked}, SelectGuidance); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("locked select guidance error = %v", err)
+	}
+}
+
+func TestStopAudioPreservesConversationPhase(t *testing.T) {
+	for _, phase := range []Phase{Locked, Conversation, ChoosingGuidance, Sleeping} {
+		next, err := Apply(Snapshot{Phase: phase, AudioPlaying: true}, StopAudio)
+		if err != nil {
+			t.Fatalf("stop audio from %s: %v", phase, err)
+		}
+		if next.Phase != phase || next.AudioPlaying {
+			t.Fatalf("stop audio from %s = %+v", phase, next)
+		}
+	}
+}
+
 func TestInvalidTransition(t *testing.T) {
 	_, err := Apply(Snapshot{Phase: WaitingToLock}, StartConversation)
 	if !errors.Is(err, ErrInvalidTransition) {

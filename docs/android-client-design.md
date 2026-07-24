@@ -58,7 +58,7 @@ Android 正式流程不负责：
 | GET | `/conversations/tonight` | 获取轮数、processing 和历史，正式 UI 可只展示状态 |
 | POST | `/conversations/activity` | 仅 Debug 文字倾诉需要 |
 | POST | `/conversations/turn` | 仅 Debug 文字倾诉需要；不是正式语音路径 |
-| POST | `/conversations/finalize` | Debug/人工提前结束入口，可选 |
+| POST | `/conversations/finalize` | Debug 收尾入口；仅已完成 3 轮时可用 |
 | GET | `/journals` | 必须实现，默认 7 张 |
 | GET/PATCH/DELETE | `/journals/{id}` | 必须实现详情、待办、删除 |
 | GET | `/memories` | `/journals` 别名，不必重复调用 |

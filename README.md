@@ -18,7 +18,7 @@
 
 - 今晚状态机：`WAITING_TO_LOCK → LOCKED → CONVERSATION → CHOOSING_GUIDANCE → SLEEPING → SUNRISE → AWAKE`
 - 开仓异常状态 `PHONE_REMOVED` 及闭仓恢复
-- 最多 3 轮睡前倾诉、提前收尾、记忆卡生成
+- 固定 3 轮睡前倾诉与记忆卡生成；不足 3 轮不会进入引导阶段
 - Claude 主适配器 + 本地 `FallbackAdapter` + 高风险固定提示
 - T5 设备事件幂等、设备命令长轮询和 ACK
 - 按 Demo 用户分组的 WebSocket 广播
@@ -198,7 +198,7 @@ X-Demo-User-Id: expo-user-001
 | GET | `/api/v1/conversations/tonight` | 完整对话恢复 |
 | POST | `/api/v1/conversations/activity` | 延长静默截止 |
 | POST | `/api/v1/conversations/turn` | Debug 文字入口；T5 ASR 在后端内部复用同一服务 |
-| POST | `/api/v1/conversations/finalize` | 提前收尾 |
+| POST | `/api/v1/conversations/finalize` | Debug 收尾；不足 3 轮返回 409 |
 | GET | `/api/v1/journals?limit=7` | 最近记忆卡 |
 | GET/PATCH/DELETE | `/api/v1/journals/{id}` | 单卡详情、待办状态和删除 |
 | GET | `/api/v1/memories?limit=7` | journals 别名 |

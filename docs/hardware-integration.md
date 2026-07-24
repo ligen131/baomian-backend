@@ -85,7 +85,9 @@ wss://bm.lg.gl/api/v1/device/voice?deviceId=<URL encoded deviceId>&userId=<URL e
 }
 ```
 
-固件必须校验 audio 参数。不支持返回格式时停止语音流程并上报诊断，不能按错误采样率播放。
+`completedTurns` 是必填的驼峰字段，必须始终为 JSON number 类型的非负整数；首次会话也必须明确发送 `0`，不能省略、传字符串或 null。固件必须校验 audio 参数。不支持返回格式时停止语音流程并上报诊断，不能按错误采样率播放。
+
+正常稳定状态必须满足：`LOCKED=0`、`CONVERSATION=0/1/2`、`CHOOSING_GUIDANCE=3`、`SLEEPING=3`。后端发现历史矛盾状态时会拒绝建立正常语音流程并记录诊断，不会篡改轮数掩盖数据库问题。
 
 ### 4.2 开始今晚会话（T5 上行）
 

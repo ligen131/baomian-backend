@@ -105,6 +105,10 @@ type voiceSession struct {
 func (s *voiceSession) Ready(ctx context.Context) error {
 	history, err := s.service.conversation.History(ctx, s.userID)
 	if err != nil {
+		var serviceErr *Error
+		if errors.As(err, &serviceErr) && serviceErr.Code == "invalid_transition" {
+			return s.sendConversationError(ctx, err, "")
+		}
 		return err
 	}
 	return s.output.SendEvent(ctx, voice.ServerEvent{

@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,6 +50,24 @@ type NightSession struct {
 	AudioEndsAt                   *time.Time
 	CreatedAt                     time.Time
 	UpdatedAt                     time.Time
+}
+
+func ValidateNightSessionConversationState(session *NightSession) error {
+	valid := false
+	switch session.Phase {
+	case "LOCKED":
+		valid = session.ConversationTurns == 0
+	case "CONVERSATION":
+		valid = session.ConversationTurns >= 0 && session.ConversationTurns < 3
+	case "CHOOSING_GUIDANCE", "SLEEPING":
+		valid = session.ConversationTurns == 3
+	default:
+		return nil
+	}
+	if !valid {
+		return fmt.Errorf("inconsistent night session state: phase=%s conversationTurns=%d", session.Phase, session.ConversationTurns)
+	}
+	return nil
 }
 
 type ConversationTurn struct {

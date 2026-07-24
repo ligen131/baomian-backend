@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -50,11 +51,22 @@ func TestDeviceVoiceControllerWebSocketSmoke(t *testing.T) {
 	}
 	defer connection.Close()
 
-	var ready voice.ServerEvent
-	if err := connection.ReadJSON(&ready); err != nil {
+	_, readyPayload, err := connection.ReadMessage()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if ready.Type != voice.EventSessionReady || ready.CompletedTurns != 1 {
+	var readyJSON map[string]any
+	if err := json.Unmarshal(readyPayload, &readyJSON); err != nil {
+		t.Fatal(err)
+	}
+	if readyJSON["completedTurns"] != float64(0) {
+		t.Fatalf("raw ready = %s", readyPayload)
+	}
+	var ready voice.ServerEvent
+	if err := json.Unmarshal(readyPayload, &ready); err != nil {
+		t.Fatal(err)
+	}
+	if ready.Type != voice.EventSessionReady || ready.CompletedTurns != 0 {
 		t.Fatalf("ready = %#v", ready)
 	}
 	if err := connection.WriteJSON(voice.ClientEvent{Type: voice.EventSessionStart, EventID: "start-1"}); err != nil {
@@ -95,7 +107,7 @@ type fakeControllerVoiceSession struct {
 
 func (s *fakeControllerVoiceSession) Ready(ctx context.Context) error {
 	return s.output.SendEvent(ctx, voice.ServerEvent{
-		Type: voice.EventSessionReady, Phase: "CONVERSATION", CompletedTurns: 1,
+		Type: voice.EventSessionReady, Phase: "LOCKED", CompletedTurns: 0,
 		Audio: voice.DefaultAudioFormat(),
 	})
 }

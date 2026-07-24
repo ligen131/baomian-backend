@@ -103,6 +103,9 @@ func (s *Store) GetOrCreateTonight(ctx context.Context, userID string, date time
 }
 
 func (s *Store) UpdateNightSession(ctx context.Context, session *model.NightSession) error {
+	if err := model.ValidateNightSessionConversationState(session); err != nil {
+		return fmt.Errorf("validate night session: %w", err)
+	}
 	if err := s.db.WithContext(ctx).Save(session).Error; err != nil {
 		return fmt.Errorf("update night session: %w", err)
 	}

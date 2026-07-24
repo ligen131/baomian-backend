@@ -58,6 +58,12 @@ func (s *ConversationService) History(ctx context.Context, userID string) (dto.C
 	if err != nil {
 		return dto.ConversationHistoryResponse{}, NewError("storage_error", "读取今晚状态失败", err)
 	}
+	if err := model.ValidateNightSessionConversationState(session); err != nil {
+		if s.logger != nil {
+			s.logger.ErrorContext(ctx, "inconsistent night session state", "sessionId", session.ID, "phase", session.Phase, "completedTurns", session.ConversationTurns)
+		}
+		return dto.ConversationHistoryResponse{}, &Error{Code: "invalid_transition", Message: "今晚状态异常，请重新开始会话", Details: map[string]any{"phase": session.Phase, "completedTurns": session.ConversationTurns}, Cause: err}
+	}
 	turns, err := s.store.ListConversationTurns(ctx, session.ID)
 	if err != nil {
 		return dto.ConversationHistoryResponse{}, NewError("storage_error", "读取对话历史失败", err)
@@ -243,8 +249,7 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 		if session.ConversationTurns >= 3 {
 			return NewError("conversation_limit", "今晚的倾诉已达到 3 轮上限", nil)
 		}
-		session.ConversationTurns++
-		turnIndex = session.ConversationTurns
+		turnIndex = nextTurnIndex(session.ConversationTurns)
 		leaseUntil := now.Add(s.processingLease)
 		session.ConversationProcessingUntil = &leaseUntil
 		session.ConversationLastActivityAt = &now
@@ -314,6 +319,7 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 			return err
 		}
 		session.LatestAIDraft = model.JSON(json.RawMessage(draft))
+		session.ConversationTurns = completedTurnsAfterReply(session.ConversationTurns, turnIndex)
 		session.ConversationProcessingUntil = nil
 		now := s.now().UTC()
 		session.ConversationLastActivityAt = &now
@@ -433,7 +439,17 @@ func finalResult(ctx context.Context, tx repository.Store, session *model.NightS
 	return fallback.Generate(ctx, ai.Request{Text: text, TurnIndex: max(session.ConversationTurns, 1)})
 }
 
+func validateConversationFinalization(session *model.NightSession) error {
+	if session.ConversationTurns < 3 {
+		return &Error{Code: "conversation_incomplete", Message: "倾诉尚未完成 3 轮", Details: map[string]any{"phase": session.Phase, "completedTurns": session.ConversationTurns}}
+	}
+	return nil
+}
+
 func finalizeSession(ctx context.Context, tx repository.Store, session *model.NightSession, userID string, result dto.AIResult, reason string, now time.Time) (*model.MemoryCard, error) {
+	if err := validateConversationFinalization(session); err != nil {
+		return nil, err
+	}
 	result.ShouldFinalize = true
 	card := memoryCard(session, userID, result, now)
 	if err := tx.UpsertMemoryCard(ctx, card); err != nil {
@@ -454,10 +470,18 @@ func finalizeSession(ctx context.Context, tx repository.Store, session *model.Ni
 	return card, nil
 }
 
-func conversationFinalizePolicy(turnIndex int, result dto.AIResult) (bool, string) {
-	if result.HighRisk && result.ShouldFinalize {
-		return true, "safety"
+func nextTurnIndex(completedTurns int) int {
+	return completedTurns + 1
+}
+
+func completedTurnsAfterReply(current, turnIndex int) int {
+	if turnIndex > current {
+		return turnIndex
 	}
+	return current
+}
+
+func conversationFinalizePolicy(turnIndex int, _ dto.AIResult) (bool, string) {
 	if turnIndex >= 3 {
 		return true, "turn_limit"
 	}

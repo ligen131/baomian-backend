@@ -97,7 +97,7 @@ T5 PCM
 
 `POST /conversations/activity` 是 Debug 文字客户端兼容入口。T5 语音流由 VoiceSessionService 在实际活动时推进同一服务端计时语义。AI 调用前设置 processing lease；Coordinator 仅在 lease 不存在或到期后自动收尾。
 
-`finalizeReason`：`manual`、`turn_limit`、`silence`、`max_duration`。
+`finalizeReason`：`manual`、`turn_limit`、`silence`、`max_duration`；所有收尾入口都只允许已完成 3 轮的会话，`manual` 仅用于 Debug 收尾。
 
 ### 4.3 开仓恢复
 

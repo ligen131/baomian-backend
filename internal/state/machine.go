@@ -86,14 +86,13 @@ func Apply(current Snapshot, trigger Trigger) (Snapshot, error) {
 			return next, nil
 		}
 	case SelectGuidance:
-		if current.Phase == ChoosingGuidance || current.Phase == Locked {
+		if current.Phase == ChoosingGuidance {
 			next.Phase = Sleeping
 			next.AudioPlaying = true
 			return next, nil
 		}
 	case StopAudio:
 		if current.Phase == Sleeping || current.Phase == Conversation || current.Phase == ChoosingGuidance || current.Phase == Locked {
-			next.Phase = Sleeping
 			next.AudioPlaying = false
 			return next, nil
 		}

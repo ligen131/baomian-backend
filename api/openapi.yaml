@@ -98,7 +98,7 @@ paths:
   /conversations/finalize:
     post:
       tags: [Conversation]
-      summary: 提前结束倾诉并生成或更新晚安卡
+      summary: Debug 收尾并生成或更新晚安卡；仅允许已完成 3 轮的会话
       responses:
         "200": {description: 晚安卡与今晚状态, content: {application/json: {schema: {$ref: "#/components/schemas/FinalizeResponse"}}}}
         "409": {$ref: "#/components/responses/Error"}
@@ -300,7 +300,7 @@ components:
         audioPlaying: {type: boolean}
         pausedForTonight: {type: boolean}
         remindersSkipped: {type: boolean}
-        finalizeReason: {type: string, enum: [manual, turn_limit, silence, max_duration]}
+        finalizeReason: {type: string, enum: [manual, turn_limit, silence, max_duration]} # manual 仅可用于已完成 3 轮的 Debug 收尾
         conversationStartedAt: {type: string, format: date-time}
         conversationSilenceDeadlineAt: {type: string, format: date-time}
         conversationHardDeadlineAt: {type: string, format: date-time}

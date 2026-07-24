@@ -107,6 +107,24 @@ func TestVoiceSessionProtectsConversationDuringReplyPlayback(t *testing.T) {
 	}
 }
 
+func TestVoiceSessionReadyReportsInconsistentPersistedState(t *testing.T) {
+	conversation := &fakeVoiceConversation{
+		historyErr: &Error{Code: "invalid_transition", Message: "今晚状态异常", Details: map[string]any{"phase": string(state.ChoosingGuidance), "completedTurns": 0}},
+	}
+	output := newFakeVoiceOutput()
+	service := NewVoiceSessionService(conversation, &fakeVoiceTonight{}, &fakeASRClient{}, &fakeTTSClient{}, "开场", "呼吸", 60*time.Second)
+	session := service.NewSession("user", "device", output)
+	defer session.Close()
+
+	if err := session.Ready(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	event := waitForEvent(t, output, voice.EventError, time.Second)
+	if event.Code != voice.ErrorInvalidPhase || event.Retryable {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
 func TestVoiceSessionEmptyTranscriptDoesNotCallConversation(t *testing.T) {
 	conversation := &fakeVoiceConversation{phase: string(state.Conversation)}
 	asr := &fakeASRClient{transcripts: []string{""}}
@@ -192,11 +210,15 @@ type fakeVoiceConversation struct {
 	requests          []dto.ConversationTurnRequest
 	responses         []dto.ConversationTurnResponse
 	playbackLifecycle []string
+	historyErr        error
 }
 
 func (f *fakeVoiceConversation) History(context.Context, string) (dto.ConversationHistoryResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.historyErr != nil {
+		return dto.ConversationHistoryResponse{}, f.historyErr
+	}
 	return dto.ConversationHistoryResponse{Tonight: dto.TonightState{Phase: f.phase, ConversationTurns: len(f.requests)}}, nil
 }
 

@@ -87,6 +87,21 @@ type ServerEvent struct {
 	Retryable       bool         `json:"retryable,omitempty"`
 }
 
+type serverEventJSON ServerEvent
+
+func (e ServerEvent) MarshalJSON() ([]byte, error) {
+	if e.Type != EventSessionReady {
+		return json.Marshal(serverEventJSON(e))
+	}
+	return json.Marshal(struct {
+		serverEventJSON
+		CompletedTurns int `json:"completedTurns"`
+	}{
+		serverEventJSON: serverEventJSON(e),
+		CompletedTurns:  e.CompletedTurns,
+	})
+}
+
 func DefaultAudioFormat() *AudioFormat {
 	return &AudioFormat{
 		Codec: "pcm", SampleRate: PCMSampleRate, BitDepth: PCMBitDepth,

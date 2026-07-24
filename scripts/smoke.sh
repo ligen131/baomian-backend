@@ -34,15 +34,17 @@ request POST /api/v1/tonight/actions '{"action":"simulate_box_closed"}' >/dev/nu
 request POST /api/v1/tonight/actions '{"action":"start_conversation"}' >/dev/null
 request POST /api/v1/conversations/activity '{"activity":"typing"}' | grep -q 'conversationSilenceDeadlineAt'
 
-printf '%s\n' '[4/12] idempotent voice turn'
-TURN_BODY=$(printf '{"text":"明天要做工作汇报，我有点紧张。","inputMode":"voice","clientRequestId":"%s"}' "$REQUEST_ID")
+printf '%s\n' '[4/12] three turns with idempotent first turn'
+TURN_BODY=$(printf '{"text":"明天要做工作汇报，我有点紧张。","inputMode":"voice","clientRequestId":"%s-1"}' "$REQUEST_ID")
 first_turn=$(request POST /api/v1/conversations/turn "$TURN_BODY")
-second_turn=$(request POST /api/v1/conversations/turn "$TURN_BODY")
-printf '%s' "$first_turn" | grep -q '"fallback"'
-printf '%s' "$second_turn" | grep -q '"reply"'
+first_retry=$(request POST /api/v1/conversations/turn "$TURN_BODY")
+printf '%s' "$first_turn" | grep -q '"conversationTurns":1'
+printf '%s' "$first_retry" | grep -q '"reply"'
+request POST /api/v1/conversations/turn "$(printf '{"text":"我主要担心上台会忘词。","inputMode":"voice","clientRequestId":"%s-2"}' "$REQUEST_ID")" | grep -q '"conversationTurns":2'
+request POST /api/v1/conversations/turn "$(printf '{"text":"说出来之后感觉轻松一些了。","inputMode":"voice","clientRequestId":"%s-3"}' "$REQUEST_ID")" | grep -q '"conversationTurns":3'
 request GET /api/v1/conversations/tonight | grep -q '"inputMode":"voice"'
 
-printf '%s\n' '[5/12] finalize and select timed guidance'
+printf '%s\n' '[5/12] verify finalized session and select timed guidance'
 finalized=$(request POST /api/v1/conversations/finalize '{}')
 journal_id=$(printf '%s' "$finalized" | sed -n 's/.*"journal":{"id":"\([^"]*\)".*/\1/p')
 [ -n "$journal_id" ]
