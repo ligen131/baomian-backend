@@ -13,6 +13,11 @@ chmod 600 "$root/.env"
 cat > "$bin/psql" <<'EOF'
 #!/usr/bin/env bash
 set -eu
+[[ "${PGHOST:-}" == 'db.example' ]]
+[[ "${PGPORT:-}" == '5432' ]]
+[[ "${PGUSER:-}" == 'secret-user' ]]
+[[ "${PGPASSWORD:-}" == 'secret-password' ]]
+[[ "${PGDATABASE:-}" == 'baomian' ]]
 count_file="$RESET_TEST_TMP/count"
 count=0
 if [[ -f "$count_file" ]]; then count=$(<"$count_file"); fi

@@ -70,11 +70,44 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
   exit 2
 fi
 
+mapfile -d '' connection_values < <(DATABASE_URL="$DATABASE_URL" python3 - <<'PY'
+import os
+import sys
+from urllib.parse import parse_qs, unquote, urlsplit
+
+parsed = urlsplit(os.environ["DATABASE_URL"])
+if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+    raise SystemExit("DATABASE_URL must be a PostgreSQL URI")
+values = (
+    parsed.hostname,
+    str(parsed.port or 5432),
+    unquote(parsed.username or ""),
+    unquote(parsed.password or ""),
+    unquote(parsed.path.lstrip("/")),
+    parse_qs(parsed.query).get("sslmode", [""])[0],
+)
+for value in values:
+    sys.stdout.buffer.write(value.encode() + b"\0")
+PY
+)
+if (( ${#connection_values[@]} != 6 )) || [[ -z "${connection_values[4]}" ]]; then
+  printf '%s\n' 'DATABASE_URL must include a database name' >&2
+  exit 2
+fi
+
 common_args=(-X -v ON_ERROR_STOP=1 -P pager=off -v "user_id=$user_id" -v "device_id=$device_id")
+connection_env=(
+  "PGHOST=${connection_values[0]}"
+  "PGPORT=${connection_values[1]}"
+  "PGUSER=${connection_values[2]}"
+  "PGPASSWORD=${connection_values[3]}"
+  "PGDATABASE=${connection_values[4]}"
+  "PGSSLMODE=${connection_values[5]}"
+)
 
 if (( apply == 0 )); then
   printf 'DRY RUN: previewing tonight reset for user=%s device=%s\n' "$user_id" "$device_id"
-  PGDATABASE="$DATABASE_URL" "$psql_cmd" "${common_args[@]}" <<'SQL'
+  env "${connection_env[@]}" "$psql_cmd" "${common_args[@]}" <<'SQL'
 WITH target AS (
     SELECT ns.id, ns.date, ns.phase, ns.conversation_turns
     FROM night_sessions ns
@@ -111,7 +144,7 @@ SQL
 fi
 
 printf 'Applying tonight reset for user=%s device=%s\n' "$user_id" "$device_id"
-PGDATABASE="$DATABASE_URL" "$psql_cmd" "${common_args[@]}" <<'SQL'
+env "${connection_env[@]}" "$psql_cmd" "${common_args[@]}" <<'SQL'
 BEGIN;
 WITH target AS MATERIALIZED (
     SELECT ns.id, ns.date
