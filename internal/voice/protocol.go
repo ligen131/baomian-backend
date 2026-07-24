@@ -39,6 +39,8 @@ const (
 	ErrorTurnInProgress      = "turn_in_progress"
 	ErrorTurnTooLong         = "turn_too_long"
 	ErrorConversationLimit   = "conversation_limit"
+	ErrorConversationExpired = "conversation_expired"
+	ErrorServiceUnavailable  = "service_unavailable"
 	ErrorASRUnavailable      = "asr_unavailable"
 	ErrorEmptyTranscript     = "empty_transcript"
 	ErrorAIUnavailable       = "ai_unavailable"

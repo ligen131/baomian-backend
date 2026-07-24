@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ type ConversationService struct {
 	silenceTimeout  time.Duration
 	maxDuration     time.Duration
 	processingLease time.Duration
+	logger          *slog.Logger
 	now             func() time.Time
 }
 
@@ -33,11 +35,16 @@ func NewConversationService(
 	silenceTimeout time.Duration,
 	maxDuration time.Duration,
 	processingLease time.Duration,
+	logger ...*slog.Logger,
 ) *ConversationService {
+	var serviceLogger *slog.Logger
+	if len(logger) > 0 {
+		serviceLogger = logger[0]
+	}
 	return &ConversationService{
 		store: store, ai: adapter, hub: hub,
 		silenceTimeout: silenceTimeout, maxDuration: maxDuration,
-		processingLease: processingLease, now: time.Now,
+		processingLease: processingLease, logger: serviceLogger, now: time.Now,
 	}
 }
 
@@ -64,6 +71,51 @@ func (s *ConversationService) History(ctx context.Context, userID string) (dto.C
 		result.Turns = append(result.Turns, dto.ConversationTurnFromModel(&turns[i]))
 	}
 	return result, nil
+}
+
+func (s *ConversationService) BeginPlayback(ctx context.Context, userID string) error {
+	return s.updatePlaybackProtection(ctx, userID, true)
+}
+
+func (s *ConversationService) EndPlayback(ctx context.Context, userID string) error {
+	return s.updatePlaybackProtection(ctx, userID, false)
+}
+
+func (s *ConversationService) updatePlaybackProtection(ctx context.Context, userID string, active bool) error {
+	err := s.store.WithTx(ctx, func(tx repository.Store) error {
+		profile, err := tx.GetOrCreateProfile(ctx, userID)
+		if err != nil {
+			return err
+		}
+		now := s.now().UTC()
+		session, err := tx.GetOrCreateTonight(ctx, userID, profileDate(now, profile.TimeZone), true)
+		if err != nil {
+			return err
+		}
+		if session.Phase != string(state.Conversation) {
+			return &Error{Code: "invalid_transition", Message: "当前不在倾诉阶段", Details: map[string]any{"phase": session.Phase}}
+		}
+		if active {
+			leaseUntil := now.Add(s.processingLease)
+			if session.ConversationHardDeadlineAt != nil && leaseUntil.Before(*session.ConversationHardDeadlineAt) {
+				leaseUntil = *session.ConversationHardDeadlineAt
+			}
+			session.ConversationProcessingUntil = &leaseUntil
+			return tx.UpdateNightSession(ctx, session)
+		}
+		session.ConversationProcessingUntil = nil
+		session.ConversationLastActivityAt = &now
+		deadline := now.Add(s.silenceTimeout)
+		if session.ConversationHardDeadlineAt != nil && deadline.After(*session.ConversationHardDeadlineAt) {
+			deadline = *session.ConversationHardDeadlineAt
+		}
+		session.ConversationSilenceDeadlineAt = &deadline
+		return tx.UpdateNightSession(ctx, session)
+	})
+	if err != nil {
+		return normalizeServiceError(err, "更新语音播放状态失败")
+	}
+	return nil
 }
 
 func (s *ConversationService) Activity(ctx context.Context, userID string, request dto.ConversationActivityRequest) (dto.TonightState, error) {
@@ -239,12 +291,17 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 	}
 	result, err := s.ai.Generate(ctx, aiRequest)
 	if err != nil {
+		if s.logger != nil {
+			s.logger.ErrorContext(ctx, "conversation AI generation failed", "sessionId", sessionID, "turnId", request.ClientRequestID, "turnIndex", turnIndex, "errorCategory", "ai_error", "error", err)
+		}
 		s.releaseProcessingLease(ctx, sessionID)
 		return dto.ConversationTurnResponse{}, NewError("ai_error", "生成睡前回复失败", err)
 	}
-	if turnIndex >= 3 {
-		result.ShouldFinalize = true
+	if s.logger != nil {
+		s.logger.InfoContext(ctx, "conversation AI generation completed", "sessionId", sessionID, "turnId", request.ClientRequestID, "turnIndex", turnIndex, "fallback", result.Fallback, "highRisk", result.HighRisk)
 	}
+	shouldFinalize, finalizeReason := conversationFinalizePolicy(turnIndex, result)
+	result.ShouldFinalize = shouldFinalize
 
 	var response dto.ConversationTurnResponse
 	err = s.store.WithTx(ctx, func(tx repository.Store) error {
@@ -278,9 +335,13 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 		}
 		var card *model.MemoryCard
 		if result.ShouldFinalize {
-			card, err = finalizeSession(ctx, tx, session, userID, result, "turn_limit", now)
+			previousPhase := session.Phase
+			card, err = finalizeSession(ctx, tx, session, userID, result, finalizeReason, now)
 			if err != nil {
 				return err
+			}
+			if s.logger != nil {
+				s.logger.InfoContext(ctx, "night session phase changed", "sessionId", session.ID, "from", previousPhase, "to", session.Phase, "trigger", "conversation_turn", "finalizeReason", finalizeReason, "completedTurns", session.ConversationTurns)
 			}
 		}
 		if err := tx.UpdateNightSession(ctx, session); err != nil {
@@ -391,6 +452,16 @@ func finalizeSession(ctx context.Context, tx repository.Store, session *model.Ni
 	session.FinalizeReason = reason
 	clearConversationTiming(session)
 	return card, nil
+}
+
+func conversationFinalizePolicy(turnIndex int, result dto.AIResult) (bool, string) {
+	if result.HighRisk && result.ShouldFinalize {
+		return true, "safety"
+	}
+	if turnIndex >= 3 {
+		return true, "turn_limit"
+	}
+	return false, ""
 }
 
 func resultForDuplicate(assistant *model.ConversationTurn) (dto.AIResult, error) {

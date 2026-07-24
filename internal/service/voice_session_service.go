@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 type VoiceConversation interface {
 	History(ctx context.Context, userID string) (dto.ConversationHistoryResponse, error)
 	Turn(ctx context.Context, userID string, request dto.ConversationTurnRequest) (dto.ConversationTurnResponse, error)
+	BeginPlayback(ctx context.Context, userID string) error
+	EndPlayback(ctx context.Context, userID string) error
 }
 
 type VoiceTonight interface {
@@ -48,6 +51,7 @@ type VoiceSessionService struct {
 	openingText     string
 	breathingScript string
 	maxUtterance    time.Duration
+	logger          *slog.Logger
 	now             func() time.Time
 }
 
@@ -59,11 +63,16 @@ func NewVoiceSessionService(
 	openingText string,
 	breathingScript string,
 	maxUtterance time.Duration,
+	logger ...*slog.Logger,
 ) *VoiceSessionService {
+	var serviceLogger *slog.Logger
+	if len(logger) > 0 {
+		serviceLogger = logger[0]
+	}
 	return &VoiceSessionService{
 		conversation: conversation, tonight: tonight, asr: asr, tts: tts,
 		openingText: openingText, breathingScript: breathingScript,
-		maxUtterance: maxUtterance, now: time.Now,
+		maxUtterance: maxUtterance, logger: serviceLogger, now: time.Now,
 	}
 }
 
@@ -243,14 +252,20 @@ func (s *voiceSession) endInput(ctx context.Context, turnID string) error {
 		Text: transcript, InputMode: "voice", ClientRequestID: turnID,
 	})
 	if err != nil {
-		var serviceErr *Error
-		if errors.As(err, &serviceErr) && serviceErr.Code == "conversation_limit" {
-			return s.sendVoiceError(ctx, voice.ErrorConversationLimit, "今晚的对话已经完成", false, turnID)
-		}
-		return s.sendVoiceError(ctx, voice.ErrorAIUnavailable, "回复暂时生成失败，请稍后再试", true, turnID)
+		return s.sendConversationError(ctx, err, turnID)
 	}
 	completed := response.Journal != nil || response.Tonight.ConversationTurns >= 3
+	if !completed {
+		if err := s.service.conversation.BeginPlayback(ctx, s.userID); err != nil {
+			return s.sendConversationError(ctx, err, turnID)
+		}
+	}
 	s.startPlayback("reply", response.Tonight.ConversationTurns, turnID, response.Result.Reply, func(playbackErr error) {
+		if !completed {
+			endCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.service.conversation.EndPlayback(endCtx, s.userID)
+		}
 		if playbackErr == nil && completed {
 			s.completeConversation(response)
 		}
@@ -393,6 +408,55 @@ func (s *voiceSession) turnID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.currentTurnID
+}
+
+type mappedConversationError struct {
+	code      string
+	message   string
+	retryable bool
+	internal  string
+}
+
+func mapConversationError(err error) mappedConversationError {
+	mapped := mappedConversationError{
+		code: voice.ErrorServiceUnavailable, message: "服务暂时不可用，请稍后再试", retryable: true,
+		internal: "internal_error",
+	}
+	var serviceErr *Error
+	if !errors.As(err, &serviceErr) {
+		return mapped
+	}
+	mapped.internal = serviceErr.Code
+	switch serviceErr.Code {
+	case "invalid_transition":
+		mapped.code, mapped.message, mapped.retryable = voice.ErrorInvalidPhase, "当前状态无法继续语音会话", false
+	case "conversation_limit":
+		mapped.code, mapped.message, mapped.retryable = voice.ErrorConversationLimit, "今晚的对话已经完成", false
+	case "request_in_progress":
+		mapped.code, mapped.message, mapped.retryable = voice.ErrorTurnInProgress, "上一轮语音仍在处理中", true
+	case "conversation_expired":
+		mapped.code, mapped.message, mapped.retryable = voice.ErrorConversationExpired, "今晚的倾诉时间已结束", false
+	case "ai_error":
+		mapped.code, mapped.message, mapped.retryable = voice.ErrorAIUnavailable, "回复暂时生成失败，请稍后再试", true
+	case "storage_error":
+		mapped.code, mapped.message, mapped.retryable = voice.ErrorServiceUnavailable, "服务暂时不可用，请稍后再试", true
+	}
+	return mapped
+}
+
+func (s *voiceSession) sendConversationError(ctx context.Context, err error, turnID string) error {
+	mapped := mapConversationError(err)
+	if s.service.logger != nil {
+		phase := ""
+		var serviceErr *Error
+		if errors.As(err, &serviceErr) && serviceErr.Details != nil {
+			if value, ok := serviceErr.Details["phase"].(string); ok {
+				phase = value
+			}
+		}
+		s.service.logger.WarnContext(ctx, "voice turn failed", "turnId", turnID, "internalCode", mapped.internal, "deviceCode", mapped.code, "phase", phase, "retryable", mapped.retryable)
+	}
+	return s.sendVoiceError(ctx, mapped.code, mapped.message, mapped.retryable, turnID)
 }
 
 func (s *voiceSession) sendVoiceError(ctx context.Context, code, message string, retryable bool, turnID string) error {

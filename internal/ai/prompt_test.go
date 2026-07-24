@@ -12,6 +12,8 @@ func TestSystemPromptContainsProductConversationRules(t *testing.T) {
 		"1 至 3 句话",
 		"不超过 60 个汉字",
 		"每轮最多提出一个问题",
+		"turnIndex<3",
+		"shouldFinalize 必须为 false",
 		"turnIndex>=3",
 		"shouldFinalize 必须为 true",
 		"不需要继续回答",

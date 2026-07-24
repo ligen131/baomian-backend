@@ -72,6 +72,7 @@ func (c *Coordinator) Scan(ctx context.Context) error {
 				return err
 			}
 			if session.Phase == string(state.Conversation) && conversationDue(session, now) {
+				previousPhase := session.Phase
 				result, err := coordinatorResult(ctx, tx, session)
 				if err != nil {
 					return err
@@ -93,6 +94,9 @@ func (c *Coordinator) Scan(ctx context.Context) error {
 				clearConversationTiming(session)
 				if err := tx.UpdateNightSession(ctx, session); err != nil {
 					return err
+				}
+				if c.logger != nil {
+					c.logger.InfoContext(ctx, "night session phase changed", "sessionId", session.ID, "from", previousPhase, "to", session.Phase, "trigger", "coordinator", "finalizeReason", session.FinalizeReason, "completedTurns", session.ConversationTurns)
 				}
 				eventType = "journal.created"
 				eventData = coordinatorFinalizeEvent{
@@ -153,6 +157,9 @@ func (c *Coordinator) Scan(ctx context.Context) error {
 }
 
 func conversationDue(session *model.NightSession, now time.Time) bool {
+	if session.ConversationTurns < 3 {
+		return false
+	}
 	if session.ConversationProcessingUntil != nil && now.Before(*session.ConversationProcessingUntil) {
 		return false
 	}

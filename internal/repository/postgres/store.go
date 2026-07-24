@@ -229,7 +229,7 @@ func (s *Store) GetNightSessionByID(ctx context.Context, sessionID uuid.UUID, fo
 
 func (s *Store) ListDueNightSessionIDs(ctx context.Context, now time.Time, limit int) ([]uuid.UUID, error) {
 	var ids []uuid.UUID
-	due := `(phase = 'CONVERSATION' AND (conversation_silence_deadline_at <= ? OR conversation_hard_deadline_at <= ?) AND (conversation_processing_until IS NULL OR conversation_processing_until <= ?)) OR (phase = 'PHONE_REMOVED' AND resume_deadline_at <= ?) OR (audio_playing = TRUE AND audio_ends_at <= ?)`
+	due := `(phase = 'CONVERSATION' AND conversation_turns >= 3 AND (conversation_silence_deadline_at <= ? OR conversation_hard_deadline_at <= ?) AND (conversation_processing_until IS NULL OR conversation_processing_until <= ?)) OR (phase = 'PHONE_REMOVED' AND resume_deadline_at <= ?) OR (audio_playing = TRUE AND audio_ends_at <= ?)`
 	if err := s.db.WithContext(ctx).Model(&model.NightSession{}).Where(due, now, now, now, now, now).
 		Order("updated_at ASC").Limit(limit).Pluck("id", &ids).Error; err != nil {
 		return nil, fmt.Errorf("list due night sessions: %w", err)

@@ -75,6 +75,38 @@ func TestVoiceSessionCompletesThreeTurnsAndBreathingGuidance(t *testing.T) {
 	}
 }
 
+func TestVoiceSessionProtectsConversationDuringReplyPlayback(t *testing.T) {
+	conversation := &fakeVoiceConversation{phase: string(state.Conversation)}
+	conversation.responses = []dto.ConversationTurnResponse{
+		voiceTurnResponse(1, "第一轮回复", "breathing_46", false),
+	}
+	asr := &fakeASRClient{transcripts: []string{"第一轮"}}
+	output := newFakeVoiceOutput()
+	service := NewVoiceSessionService(conversation, &fakeVoiceTonight{}, asr, &fakeTTSClient{}, "开场", "呼吸", 60*time.Second)
+	session := service.NewSession("user", "device", output)
+	defer session.Close()
+
+	_ = session.HandleEvent(context.Background(), voice.ClientEvent{Type: voice.EventInputStart, EventID: "e1", TurnID: "turn-1"})
+	_ = session.HandlePCM(context.Background(), make([]byte, voice.PCMFrameBytes))
+	_ = session.HandleEvent(context.Background(), voice.ClientEvent{Type: voice.EventInputEnd, EventID: "e2", TurnID: "turn-1"})
+	waitForReplyEnd(t, output, "turn-1", time.Second)
+
+	deadline := time.Now().Add(time.Second)
+	var lifecycle []string
+	for time.Now().Before(deadline) {
+		conversation.mu.Lock()
+		lifecycle = append([]string(nil), conversation.playbackLifecycle...)
+		conversation.mu.Unlock()
+		if len(lifecycle) == 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(lifecycle) != 2 || lifecycle[0] != "begin" || lifecycle[1] != "end" {
+		t.Fatalf("playback lifecycle = %#v, want [begin end]", lifecycle)
+	}
+}
+
 func TestVoiceSessionEmptyTranscriptDoesNotCallConversation(t *testing.T) {
 	conversation := &fakeVoiceConversation{phase: string(state.Conversation)}
 	asr := &fakeASRClient{transcripts: []string{""}}
@@ -92,6 +124,29 @@ func TestVoiceSessionEmptyTranscriptDoesNotCallConversation(t *testing.T) {
 	}
 	if len(conversation.requests) != 0 {
 		t.Fatalf("conversation calls = %d", len(conversation.requests))
+	}
+}
+
+func TestMapConversationErrorUsesSpecificDeviceCodes(t *testing.T) {
+	tests := []struct {
+		internal  string
+		device    string
+		retryable bool
+	}{
+		{internal: "invalid_transition", device: voice.ErrorInvalidPhase, retryable: false},
+		{internal: "conversation_limit", device: voice.ErrorConversationLimit, retryable: false},
+		{internal: "request_in_progress", device: voice.ErrorTurnInProgress, retryable: true},
+		{internal: "conversation_expired", device: voice.ErrorConversationExpired, retryable: false},
+		{internal: "storage_error", device: voice.ErrorServiceUnavailable, retryable: true},
+		{internal: "ai_error", device: voice.ErrorAIUnavailable, retryable: true},
+	}
+	for _, test := range tests {
+		t.Run(test.internal, func(t *testing.T) {
+			mapped := mapConversationError(NewError(test.internal, "internal", nil))
+			if mapped.code != test.device || mapped.retryable != test.retryable {
+				t.Fatalf("mapped = %#v, want code=%q retryable=%v", mapped, test.device, test.retryable)
+			}
+		})
 	}
 }
 
@@ -132,10 +187,11 @@ func voiceTurnResponse(turn int, reply, guidance string, withJournal bool) dto.C
 }
 
 type fakeVoiceConversation struct {
-	mu        sync.Mutex
-	phase     string
-	requests  []dto.ConversationTurnRequest
-	responses []dto.ConversationTurnResponse
+	mu                sync.Mutex
+	phase             string
+	requests          []dto.ConversationTurnRequest
+	responses         []dto.ConversationTurnResponse
+	playbackLifecycle []string
 }
 
 func (f *fakeVoiceConversation) History(context.Context, string) (dto.ConversationHistoryResponse, error) {
@@ -149,6 +205,20 @@ func (f *fakeVoiceConversation) Turn(_ context.Context, _ string, request dto.Co
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, request)
 	return f.responses[len(f.requests)-1], nil
+}
+
+func (f *fakeVoiceConversation) BeginPlayback(context.Context, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.playbackLifecycle = append(f.playbackLifecycle, "begin")
+	return nil
+}
+
+func (f *fakeVoiceConversation) EndPlayback(context.Context, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.playbackLifecycle = append(f.playbackLifecycle, "end")
+	return nil
 }
 
 type fakeVoiceTonight struct {

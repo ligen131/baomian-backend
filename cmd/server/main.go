@@ -57,7 +57,7 @@ func main() {
 	journalService := service.NewJournalService(store, hub)
 	conversationService := service.NewConversationService(
 		store, adapter, hub,
-		cfg.ConversationSilenceTimeout, cfg.ConversationMaxDuration, cfg.AITimeout+time.Second,
+		cfg.ConversationSilenceTimeout, cfg.ConversationMaxDuration, cfg.AITimeout+time.Second, logger,
 	)
 	deviceService := service.NewDeviceService(
 		store, hub, cfg.DemoUserID, cfg.DeviceCommandLease, cfg.DeviceCommandMaxAttempts,
@@ -75,7 +75,7 @@ func main() {
 	ttsClient := speech.NewRetryingTTSClient(speech.NewVolcTTSClient(speechConfig, websocket.DefaultDialer), 2)
 	voiceSessionService := service.NewVoiceSessionService(
 		conversationService, tonightService, asrClient, ttsClient,
-		cfg.VoiceOpeningText, cfg.VoiceBreathingScript, cfg.VoiceMaxUtteranceDuration,
+		cfg.VoiceOpeningText, cfg.VoiceBreathingScript, cfg.VoiceMaxUtteranceDuration, logger,
 	)
 
 	profileController := controller.NewProfileController(profileService)
