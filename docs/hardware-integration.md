@@ -160,7 +160,7 @@ wss://bm.lg.gl/api/v1/device/voice?deviceId=<URL encoded deviceId>&userId=<URL e
 }
 ```
 
-`turnId` 必须与 `input.start` 相同。随后后端可能发送：
+`turnId` 必须与 `input.start` 相同。`input.end` 后后端异步等待 ASR final，不阻塞 WebSocket 控制读循环；默认在 8 秒内发送最终转写或 `error/asr_unavailable`。固件应分别设置 ASR、Claude、TTS 和本地播放等待期限；ASR final 建议至少等待 10–12 秒以保留网络裕量，不能把所有阶段超时都记为“等待 playback.end”。随后后端可能发送：
 
 ```json
 {"type":"transcript.final","turnId":"8ea4105c-bc68-46de-b625-c49281c6688f","text":"今天工作有点累"}
@@ -205,7 +205,7 @@ Claude 回复开始：
 }
 ```
 
-收到后立即清空缓冲。
+收到后立即清空缓冲。每个已收到的 `playback.start` 都会对应一次相同 `playbackId` 的 `playback.end` 尝试：正常为 `completed`，打断为 `interrupted`，TTS 或输出链路失败为 `upstream_error`。连接已经断开时终止帧可能无法抵达，固件仍需在 socket close 时清空本地播放状态。
 
 ### 4.8 三轮完成
 

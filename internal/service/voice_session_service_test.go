@@ -75,6 +75,73 @@ func TestVoiceSessionCompletesThreeTurnsAndBreathingGuidance(t *testing.T) {
 	}
 }
 
+func TestVoiceSessionInputEndReturnsWhileASRFinalIsPending(t *testing.T) {
+	blocking := newBlockingASRSession()
+	output := newFakeVoiceOutput()
+	service := NewVoiceSessionService(&fakeVoiceConversation{phase: string(state.Conversation)}, &fakeVoiceTonight{}, &singleASRClient{session: blocking}, &fakeTTSClient{}, "开场", "呼吸", 60*time.Second)
+	session := service.NewSession("user", "device", output)
+	defer session.Close()
+
+	if err := session.HandleEvent(context.Background(), voice.ClientEvent{Type: voice.EventInputStart, EventID: "e1", TurnID: "turn-1"}); err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan error, 1)
+	go func() {
+		ended <- session.HandleEvent(context.Background(), voice.ClientEvent{Type: voice.EventInputEnd, EventID: "e2", TurnID: "turn-1"})
+	}()
+	select {
+	case err := <-ended:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("input.end blocked on ASR final")
+	}
+
+	if err := session.HandleEvent(context.Background(), voice.ClientEvent{Type: voice.EventInputStart, EventID: "e3", TurnID: "turn-2"}); err != nil {
+		t.Fatal(err)
+	}
+	event := waitForEvent(t, output, voice.EventError, time.Second)
+	if event.Code != voice.ErrorTurnInProgress || !event.Retryable {
+		t.Fatalf("event = %#v", event)
+	}
+	blocking.finish("", &speech.UpstreamError{Service: "asr", Code: "timeout", RequestID: "request-1", Retryable: true})
+	event = waitForEvent(t, output, voice.EventError, time.Second)
+	if event.Code != voice.ErrorASRUnavailable || !event.Retryable {
+		t.Fatalf("event = %#v", event)
+	}
+	if err := session.HandleEvent(context.Background(), voice.ClientEvent{Type: voice.EventInputStart, EventID: "e4", TurnID: "turn-2"}); err != nil {
+		t.Fatal(err)
+	}
+	accepted := waitForEvent(t, output, voice.EventInputAccepted, time.Second)
+	if accepted.TurnID != "turn-2" {
+		t.Fatalf("accepted = %#v", accepted)
+	}
+}
+
+func TestVoiceSessionCloseCancelsPendingASRFinal(t *testing.T) {
+	blocking := newBlockingASRSession()
+	output := newFakeVoiceOutput()
+	service := NewVoiceSessionService(&fakeVoiceConversation{phase: string(state.Conversation)}, &fakeVoiceTonight{}, &singleASRClient{session: blocking}, &fakeTTSClient{}, "开场", "呼吸", 60*time.Second)
+	session := service.NewSession("user", "device", output)
+
+	_ = session.HandleEvent(context.Background(), voice.ClientEvent{Type: voice.EventInputStart, EventID: "e1", TurnID: "turn-1"})
+	_ = session.HandleEvent(context.Background(), voice.ClientEvent{Type: voice.EventInputEnd, EventID: "e2", TurnID: "turn-1"})
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("ASR final did not start")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocking.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("ASR final was not canceled")
+	}
+}
+
 func TestVoiceSessionProtectsConversationDuringReplyPlayback(t *testing.T) {
 	conversation := &fakeVoiceConversation{phase: string(state.Conversation)}
 	conversation.responses = []dto.ConversationTurnResponse{
@@ -206,6 +273,52 @@ func TestMapConversationErrorUsesSpecificDeviceCodes(t *testing.T) {
 	}
 }
 
+func TestStreamPlaybackEndsAfterPCMOutputFailure(t *testing.T) {
+	output := &failingPCMVoiceOutput{fakeVoiceOutput: newFakeVoiceOutput()}
+	service := NewVoiceSessionService(&fakeVoiceConversation{}, &fakeVoiceTonight{}, &fakeASRClient{}, &partialTTSClient{}, "开场", "呼吸", 60*time.Second)
+	session := service.NewSession("user", "device", output).(*voiceSession)
+	defer session.Close()
+
+	err := session.streamPlayback(context.Background(), "playback-1", "reply", 1, "turn-1", "回复")
+	if err == nil {
+		t.Fatal("PCM output failure was not returned")
+	}
+	events := drainEvents(output.events)
+	var starts, ends, ttsErrors int
+	var endReason string
+	for _, event := range events {
+		switch event.Type {
+		case voice.EventPlaybackStart:
+			starts++
+		case voice.EventPlaybackEnd:
+			ends++
+			endReason = event.Reason
+		case voice.EventError:
+			if event.Code == voice.ErrorTTSUnavailable {
+				ttsErrors++
+			}
+		}
+	}
+	if starts != 1 || ends != 1 || endReason != "upstream_error" || ttsErrors != 0 {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestStreamPlaybackEndsBeforeTTSUnavailableError(t *testing.T) {
+	output := newFakeVoiceOutput()
+	service := NewVoiceSessionService(&fakeVoiceConversation{}, &fakeVoiceTonight{}, &fakeASRClient{}, errorTTSClient{}, "开场", "呼吸", 60*time.Second)
+	session := service.NewSession("user", "device", output).(*voiceSession)
+	defer session.Close()
+
+	if err := session.streamPlayback(context.Background(), "playback-1", "reply", 1, "turn-1", "回复"); err == nil {
+		t.Fatal("TTS failure was not returned")
+	}
+	events := drainEvents(output.events)
+	if len(events) != 3 || events[0].Type != voice.EventPlaybackStart || events[1].Type != voice.EventPlaybackEnd || events[1].Reason != "upstream_error" || events[2].Type != voice.EventError || events[2].Code != voice.ErrorTTSUnavailable {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
 func TestVoiceSessionRainGuidanceStaysOnDevice(t *testing.T) {
 	conversation := &fakeVoiceConversation{phase: string(state.Conversation)}
 	conversation.responses = []dto.ConversationTurnResponse{voiceTurnResponse(3, "晚安", "rain", true)}
@@ -304,6 +417,47 @@ func (f *fakeVoiceTonight) SelectVoiceGuidance(_ context.Context, _ string, guid
 	return dto.TonightState{Phase: string(state.Sleeping), SelectedGuidance: guidance}, nil
 }
 
+type singleASRClient struct {
+	session speech.ASRSession
+}
+
+func (f *singleASRClient) Open(context.Context) (speech.ASRSession, error) {
+	return f.session, nil
+}
+
+type blockingASRSession struct {
+	started  chan struct{}
+	result   chan blockingASRResult
+	canceled chan struct{}
+}
+
+type blockingASRResult struct {
+	text string
+	err  error
+}
+
+func newBlockingASRSession() *blockingASRSession {
+	return &blockingASRSession{
+		started: make(chan struct{}), result: make(chan blockingASRResult, 1), canceled: make(chan struct{}),
+	}
+}
+
+func (f *blockingASRSession) AppendPCM(context.Context, []byte) error { return nil }
+func (f *blockingASRSession) Complete(ctx context.Context) (string, error) {
+	close(f.started)
+	select {
+	case result := <-f.result:
+		return result.text, result.err
+	case <-ctx.Done():
+		close(f.canceled)
+		return "", ctx.Err()
+	}
+}
+func (f *blockingASRSession) Close() error { return nil }
+func (f *blockingASRSession) finish(text string, err error) {
+	f.result <- blockingASRResult{text: text, err: err}
+}
+
 type fakeASRClient struct {
 	mu          sync.Mutex
 	transcripts []string
@@ -330,6 +484,18 @@ func (f *fakeASRSession) Complete(context.Context) (string, error) {
 	return f.text, nil
 }
 func (f *fakeASRSession) Close() error { return nil }
+
+type errorTTSClient struct{}
+
+func (errorTTSClient) Stream(context.Context, string, func([]byte) error) error {
+	return context.DeadlineExceeded
+}
+
+type partialTTSClient struct{}
+
+func (partialTTSClient) Stream(_ context.Context, _ string, onPCM func([]byte) error) error {
+	return onPCM(make([]byte, voice.PCMFrameBytes/2))
+}
 
 type fakeTTSClient struct {
 	mu    sync.Mutex
@@ -358,6 +524,26 @@ func (f *fakeTTSClient) countText(text string) int {
 		}
 	}
 	return count
+}
+
+type failingPCMVoiceOutput struct {
+	*fakeVoiceOutput
+}
+
+func (f *failingPCMVoiceOutput) SendPCM(context.Context, []byte) error {
+	return context.DeadlineExceeded
+}
+
+func drainEvents(events <-chan voice.ServerEvent) []voice.ServerEvent {
+	var result []voice.ServerEvent
+	for {
+		select {
+		case event := <-events:
+			result = append(result, event)
+		default:
+			return result
+		}
+	}
 }
 
 type fakeVoiceOutput struct {

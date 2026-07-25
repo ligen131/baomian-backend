@@ -68,6 +68,8 @@ cp .env.example .env
 | `VOLCENGINE_TTS_WS_URL` | `wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream` | 单向流式 TTS V3 WebSocket |
 | `VOLCENGINE_TTS_RESOURCE_ID` | `seed-tts-2.0` | 单向流式 TTS 模型资源 ID |
 | `VOLCENGINE_TTS_SPEAKER` | `zh_female_gaolengyujie_uranus_bigtts` | TTS speaker；必须对 API Key 可用 |
+| `VOLCENGINE_ASR_TIMEOUT` | `20s` | ASR 建连、初始化和单次写操作上限 |
+| `VOLCENGINE_ASR_FINAL_TIMEOUT` | `8s` | `input.end` 后等待最终识别结果上限；超时明确返回 `asr_unavailable` |
 | `VOICE_MAX_UTTERANCE_DURATION` | `60s` | 单次长按说话上限 |
 | `DEVICE_LONG_POLL_TIMEOUT` | `20s` | 设备命令长轮询默认时长，服务端最大 30 秒 |
 | `CONVERSATION_SILENCE_TIMEOUT` | `20s` | 倾诉静默自动收尾时间 |

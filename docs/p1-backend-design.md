@@ -97,7 +97,7 @@ T5 PCM
 - `conversationSilenceDeadlineAt = now + 20s`
 - `conversationHardDeadlineAt = now + 4m`
 
-`POST /conversations/activity` 是 Debug 文字客户端兼容入口。T5 语音流由 VoiceSessionService 在实际活动时推进同一服务端计时语义。AI 调用前设置 processing lease；Coordinator 仅在 lease 不存在或到期后自动收尾。
+`POST /conversations/activity` 是 Debug 文字客户端兼容入口。T5 语音流由 VoiceSessionService 在实际活动时推进同一服务端计时语义。AI 调用前设置 processing lease；Coordinator 仅在 lease 不存在或到期后自动收尾。`input.end` 后的 ASR final 在后台处理，不阻塞设备 WebSocket 读循环；默认最多等待 8 秒，随后发送最终转写或明确的 `asr_unavailable`。
 
 `finalizeReason`：`manual`、`turn_limit`、`silence`、`max_duration`；所有收尾入口都只允许已完成 3 轮的会话，`manual` 仅用于 Debug 收尾。
 
@@ -189,6 +189,7 @@ VOLCENGINE_TTS_WS_URL=wss://openspeech.bytedance.com/api/v3/tts/unidirectional/s
 VOLCENGINE_TTS_RESOURCE_ID=seed-tts-2.0
 VOLCENGINE_TTS_SPEAKER=zh_female_gaolengyujie_uranus_bigtts
 VOLCENGINE_ASR_TIMEOUT=20s
+VOLCENGINE_ASR_FINAL_TIMEOUT=8s
 VOLCENGINE_TTS_FIRST_FRAME_TIMEOUT=10s
 VOLCENGINE_TTS_TOTAL_TIMEOUT=45s
 VOICE_MAX_UTTERANCE_DURATION=60s

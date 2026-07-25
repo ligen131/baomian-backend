@@ -117,6 +117,45 @@ func TestVolcASRStreamsAggregatedPCMAndReturnsTranscript(t *testing.T) {
 	}
 }
 
+func TestVolcASRFinalTimeoutReturnsUpstreamError(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	lastReceived := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		_, _, _ = connection.ReadMessage()
+		_ = connection.WriteMessage(websocket.BinaryMessage, encodeTestASRResponse(t, 1, false, map[string]any{}))
+		_, _, _ = connection.ReadMessage()
+		close(lastReceived)
+		for {
+			if _, _, err := connection.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	config := volcTestConfig(websocketTestURL(server.URL), "")
+	config.ASRTimeout = 2 * time.Second
+	config.ASRFinalTimeout = 30 * time.Millisecond
+	client := NewVolcASRClient(config, websocket.DefaultDialer)
+	session, err := client.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	_, err = session.Complete(context.Background())
+	<-lastReceived
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) || upstream.Service != "asr" || upstream.Code != "timeout" || upstream.RequestID == "" {
+		t.Fatalf("error = %#v", err)
+	}
+}
+
 func TestVolcASRReturnsSanitizedUpstreamError(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +201,8 @@ func volcTestConfig(asrURL, ttsURL string) Config {
 		AppID: "app-1", AccessToken: "test-token", TTSAPIKey: "api-key-1",
 		ASRURL: asrURL, ASRResourceID: "asr-resource",
 		TTSURL: ttsURL, TTSResourceID: "tts-resource", TTSSpeaker: "speaker-1",
-		ASRTimeout: 2 * time.Second, TTSFirstFrameTimeout: 2 * time.Second, TTSTotalTimeout: 2 * time.Second,
+		ASRTimeout: 2 * time.Second, ASRFinalTimeout: 2 * time.Second,
+		TTSFirstFrameTimeout: 2 * time.Second, TTSTotalTimeout: 2 * time.Second,
 	}
 }
 

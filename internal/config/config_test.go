@@ -99,11 +99,28 @@ func TestLoadVolcengineSpeechDefaults(t *testing.T) {
 	if cfg.VolcengineTTSSpeaker != "zh_female_gaolengyujie_uranus_bigtts" {
 		t.Fatal(cfg.VolcengineTTSSpeaker)
 	}
-	if cfg.VolcengineASRTimeout != 20*time.Second || cfg.VoiceMaxUtteranceDuration != 60*time.Second {
-		t.Fatalf("timeouts = %s %s", cfg.VolcengineASRTimeout, cfg.VoiceMaxUtteranceDuration)
+	if cfg.VolcengineASRTimeout != 20*time.Second || cfg.VolcengineASRFinalTimeout != 8*time.Second || cfg.VoiceMaxUtteranceDuration != 60*time.Second {
+		t.Fatalf("timeouts = %s %s %s", cfg.VolcengineASRTimeout, cfg.VolcengineASRFinalTimeout, cfg.VoiceMaxUtteranceDuration)
 	}
 	if cfg.VolcengineSpeechConfigured() {
 		t.Fatal("empty ASR credentials and TTS API Key must not be configured")
+	}
+}
+
+func TestLoadVolcengineASRFinalTimeout(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://example/app")
+	t.Setenv("VOLCENGINE_ASR_FINAL_TIMEOUT", "3s")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VolcengineASRFinalTimeout != 3*time.Second {
+		t.Fatalf("final timeout = %s", cfg.VolcengineASRFinalTimeout)
+	}
+
+	t.Setenv("VOLCENGINE_ASR_FINAL_TIMEOUT", "invalid")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "VOLCENGINE_ASR_FINAL_TIMEOUT") {
+		t.Fatalf("Load() error = %v", err)
 	}
 }
 

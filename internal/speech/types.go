@@ -36,6 +36,7 @@ type Config struct {
 	TTSResourceID        string
 	TTSSpeaker           string
 	ASRTimeout           time.Duration
+	ASRFinalTimeout      time.Duration
 	TTSFirstFrameTimeout time.Duration
 	TTSTotalTimeout      time.Duration
 }

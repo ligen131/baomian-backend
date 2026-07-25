@@ -72,7 +72,8 @@ func main() {
 		ASRURL:    cfg.VolcengineASRWSURL, ASRResourceID: cfg.VolcengineASRResourceID,
 		TTSURL: cfg.VolcengineTTSWSURL, TTSResourceID: cfg.VolcengineTTSResourceID,
 		TTSSpeaker: cfg.VolcengineTTSSpeaker, ASRTimeout: cfg.VolcengineASRTimeout,
-		TTSFirstFrameTimeout: cfg.VolcengineTTSFirstFrameTimeout, TTSTotalTimeout: cfg.VolcengineTTSTotalTimeout,
+		ASRFinalTimeout: cfg.VolcengineASRFinalTimeout, TTSFirstFrameTimeout: cfg.VolcengineTTSFirstFrameTimeout,
+		TTSTotalTimeout: cfg.VolcengineTTSTotalTimeout,
 	}
 	asrClient := speech.NewVolcASRClient(speechConfig, websocket.DefaultDialer)
 	ttsClient := speech.NewRetryingTTSClient(speech.NewVolcTTSClient(speechConfig, websocket.DefaultDialer), 2)
@@ -86,7 +87,7 @@ func main() {
 	journalController := controller.NewJournalController(journalService)
 	conversationController := controller.NewConversationController(conversationService)
 	deviceController := controller.NewDeviceController(deviceService, cfg.DeviceLongPollTimeout)
-	deviceVoiceController := controller.NewDeviceVoiceController(voiceSessionService, cfg.VolcengineSpeechConfigured(), cfg.DemoUserID)
+	deviceVoiceController := controller.NewDeviceVoiceController(voiceSessionService, cfg.VolcengineSpeechConfigured(), cfg.DemoUserID, logger)
 	webSocketController := controller.NewWebSocketController(hub, registry, cfg.DemoUserID)
 
 	coordinatorContext, stopCoordinator := context.WithCancel(context.Background())

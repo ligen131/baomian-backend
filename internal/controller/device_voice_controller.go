@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -25,13 +26,18 @@ type DeviceVoiceController struct {
 	factory     service.VoiceSessionFactory
 	configured  bool
 	defaultUser string
+	logger      *slog.Logger
 	upgrader    websocket.Upgrader
 	registry    *voiceConnectionRegistry
 }
 
-func NewDeviceVoiceController(factory service.VoiceSessionFactory, configured bool, defaultUser string) *DeviceVoiceController {
+func NewDeviceVoiceController(factory service.VoiceSessionFactory, configured bool, defaultUser string, logger ...*slog.Logger) *DeviceVoiceController {
+	var serviceLogger *slog.Logger
+	if len(logger) > 0 {
+		serviceLogger = logger[0]
+	}
 	return &DeviceVoiceController{
-		factory: factory, configured: configured, defaultUser: defaultUser,
+		factory: factory, configured: configured, defaultUser: defaultUser, logger: serviceLogger,
 		upgrader: websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
 		registry: newVoiceConnectionRegistry(),
 	}
@@ -55,7 +61,14 @@ func (h *DeviceVoiceController) Connect(c *gin.Context) {
 	}
 	connection, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
+		if h.logger != nil {
+			h.logger.WarnContext(c.Request.Context(), "device voice upgrade failed", "deviceId", deviceID, "stage", "upgrade", "errorCategory", "websocket_upgrade")
+		}
 		return
+	}
+	connectedAt := time.Now()
+	if h.logger != nil {
+		h.logger.InfoContext(c.Request.Context(), "device voice connected", "deviceId", deviceID)
 	}
 	connection.SetReadLimit(voiceReadLimit)
 
@@ -72,11 +85,17 @@ func (h *DeviceVoiceController) Connect(c *gin.Context) {
 		h.registry.Remove(deviceID, connection)
 		_ = session.Close()
 		_ = connection.Close()
+		if h.logger != nil {
+			h.logger.Info("device voice disconnected", "deviceId", deviceID, "durationMs", time.Since(connectedAt).Milliseconds())
+		}
 	}()
 
 	writerDone := make(chan error, 1)
 	go voiceWritePump(connectionContext, connection, outbound, writerDone)
 	if err := session.Ready(connectionContext); err != nil {
+		if h.logger != nil {
+			h.logger.Warn("device voice ready failed", "deviceId", deviceID, "stage", "ready", "errorCategory", "session_ready")
+		}
 		return
 	}
 
@@ -87,6 +106,9 @@ func (h *DeviceVoiceController) Connect(c *gin.Context) {
 	for {
 		messageType, payload, err := connection.ReadMessage()
 		if err != nil {
+			if h.logger != nil {
+				h.logger.Info("device voice reader closed", "deviceId", deviceID, "stage", "read", "errorCategory", "connection_closed")
+			}
 			return
 		}
 		switch messageType {
@@ -113,11 +135,21 @@ func (h *DeviceVoiceController) Connect(c *gin.Context) {
 			})
 		}
 		select {
-		case <-writerDone:
+		case err := <-writerDone:
+			if h.logger != nil {
+				h.logger.Warn("device voice writer failed", "deviceId", deviceID, "stage", "write", "errorCategory", voiceWriterErrorCategory(err))
+			}
 			return
 		default:
 		}
 	}
+}
+
+func voiceWriterErrorCategory(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "context_canceled"
+	}
+	return "websocket_write"
 }
 
 type voiceOutboundMessage struct {

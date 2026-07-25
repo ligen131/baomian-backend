@@ -93,14 +93,15 @@ type voiceSession struct {
 	context  context.Context
 	cancel   context.CancelFunc
 
-	mu              sync.Mutex
-	asr             speech.ASRSession
-	currentTurnID   string
-	inputStartedAt  time.Time
-	cancelPlayback  context.CancelFunc
-	currentPlayback string
-	playbackDone    chan struct{}
-	closed          bool
+	mu               sync.Mutex
+	asr              speech.ASRSession
+	currentTurnID    string
+	processingTurnID string
+	inputStartedAt   time.Time
+	cancelPlayback   context.CancelFunc
+	currentPlayback  string
+	playbackDone     chan struct{}
+	closed           bool
 }
 
 func (s *voiceSession) Ready(ctx context.Context) error {
@@ -207,7 +208,7 @@ func (s *voiceSession) startSession(ctx context.Context) error {
 func (s *voiceSession) startInput(ctx context.Context, turnID string) error {
 	s.stopPlayback("user_interrupt")
 	s.mu.Lock()
-	if s.asr != nil || s.currentTurnID != "" {
+	if s.asr != nil || s.currentTurnID != "" || s.processingTurnID != "" {
 		s.mu.Unlock()
 		return s.sendVoiceError(ctx, voice.ErrorTurnInProgress, "上一轮语音仍在处理中", true, turnID)
 	}
@@ -239,35 +240,55 @@ func (s *voiceSession) endInput(ctx context.Context, turnID string) error {
 	asr := s.asr
 	s.asr = nil
 	s.currentTurnID = ""
+	s.processingTurnID = turnID
 	s.mu.Unlock()
-	defer asr.Close()
 
-	transcript, err := asr.Complete(ctx)
+	go s.processInput(asr, turnID)
+	return nil
+}
+
+func (s *voiceSession) processInput(asr speech.ASRSession, turnID string) {
+	startedAt := s.service.now()
+	defer asr.Close()
+	defer s.finishProcessing(turnID)
+
+	transcript, err := asr.Complete(s.context)
+	if errors.Is(err, context.Canceled) {
+		return
+	}
 	if errors.Is(err, speech.ErrEmptyTranscript) {
-		return s.sendVoiceError(ctx, voice.ErrorEmptyTranscript, "没有识别到有效内容，请重新说一次", true, turnID)
+		s.logVoiceStage("asr_final", turnID, startedAt, "empty_transcript")
+		_ = s.sendVoiceError(s.context, voice.ErrorEmptyTranscript, "没有识别到有效内容，请重新说一次", true, turnID)
+		return
 	}
 	if err != nil {
-		return s.sendVoiceError(ctx, voice.ErrorASRUnavailable, "语音识别暂时不可用，请重新说一次", true, turnID)
+		s.logVoiceStage("asr_final", turnID, startedAt, "asr_unavailable")
+		_ = s.sendVoiceError(s.context, voice.ErrorASRUnavailable, "语音识别暂时不可用，请重新说一次", true, turnID)
+		return
 	}
-	if err := s.output.SendEvent(ctx, voice.ServerEvent{Type: voice.EventTranscriptFinal, TurnID: turnID, Text: transcript}); err != nil {
-		return err
+	s.logVoiceStage("asr_final", turnID, startedAt, "completed")
+	if err := s.output.SendEvent(s.context, voice.ServerEvent{Type: voice.EventTranscriptFinal, TurnID: turnID, Text: transcript}); err != nil {
+		return
 	}
-	if err := s.output.SendEvent(ctx, voice.ServerEvent{Type: voice.EventThinking, TurnID: turnID}); err != nil {
-		return err
+	if err := s.output.SendEvent(s.context, voice.ServerEvent{Type: voice.EventThinking, TurnID: turnID}); err != nil {
+		return
 	}
 
-	response, err := s.service.conversation.Turn(ctx, s.userID, dto.ConversationTurnRequest{
+	response, err := s.service.conversation.Turn(s.context, s.userID, dto.ConversationTurnRequest{
 		Text: transcript, InputMode: "voice", ClientRequestID: turnID,
 	})
 	if err != nil {
-		return s.sendConversationError(ctx, err, turnID)
+		_ = s.sendConversationError(s.context, err, turnID)
+		return
 	}
 	completed := response.Journal != nil || response.Tonight.ConversationTurns >= 3
 	if !completed {
-		if err := s.service.conversation.BeginPlayback(ctx, s.userID); err != nil {
-			return s.sendConversationError(ctx, err, turnID)
+		if err := s.service.conversation.BeginPlayback(s.context, s.userID); err != nil {
+			_ = s.sendConversationError(s.context, err, turnID)
+			return
 		}
 	}
+	s.finishProcessing(turnID)
 	s.startPlayback("reply", response.Tonight.ConversationTurns, turnID, response.Result.Reply, func(playbackErr error) {
 		if !completed {
 			endCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -278,7 +299,20 @@ func (s *voiceSession) endInput(ctx context.Context, turnID string) error {
 			s.completeConversation(response)
 		}
 	})
-	return nil
+}
+
+func (s *voiceSession) finishProcessing(turnID string) {
+	s.mu.Lock()
+	if s.processingTurnID == turnID {
+		s.processingTurnID = ""
+	}
+	s.mu.Unlock()
+}
+
+func (s *voiceSession) logVoiceStage(stage, turnID string, startedAt time.Time, result string) {
+	if s.service.logger != nil {
+		s.service.logger.Info("voice stage completed", "deviceId", s.deviceID, "turnId", turnID, "stage", stage, "result", result, "durationMs", s.service.now().Sub(startedAt).Milliseconds())
+	}
 }
 
 func (s *voiceSession) completeConversation(response dto.ConversationTurnResponse) {
@@ -342,19 +376,32 @@ func (s *voiceSession) startPlayback(kind string, turn int, turnID, text string,
 	}()
 }
 
-func (s *voiceSession) streamPlayback(ctx context.Context, playbackID, kind string, turn int, turnID, text string) error {
+func (s *voiceSession) streamPlayback(ctx context.Context, playbackID, kind string, turn int, turnID, text string) (resultErr error) {
 	if err := s.output.SendEvent(ctx, voice.ServerEvent{
 		Type: voice.EventPlaybackStart, PlaybackID: playbackID, Kind: kind,
 		Turn: turn, TurnID: turnID, Text: text,
 	}); err != nil {
 		return err
 	}
+	endReason := "upstream_error"
+	var ttsUnavailable bool
+	defer func() {
+		_ = s.output.SendEvent(context.Background(), voice.ServerEvent{
+			Type: voice.EventPlaybackEnd, PlaybackID: playbackID, Reason: endReason,
+		})
+		if ttsUnavailable {
+			_ = s.sendVoiceError(context.Background(), voice.ErrorTTSUnavailable, "语音合成暂时不可用", true, turnID)
+		}
+	}()
+
 	buffer := make([]byte, 0, voice.PCMFrameBytes*2)
+	var outputErr error
 	err := s.service.tts.Stream(ctx, text, func(chunk []byte) error {
 		buffer = append(buffer, chunk...)
 		for len(buffer) >= voice.PCMFrameBytes {
 			frame := append([]byte(nil), buffer[:voice.PCMFrameBytes]...)
 			if err := s.output.SendPCM(ctx, frame); err != nil {
+				outputErr = err
 				return err
 			}
 			buffer = buffer[voice.PCMFrameBytes:]
@@ -362,15 +409,10 @@ func (s *voiceSession) streamPlayback(ctx context.Context, playbackID, kind stri
 		return nil
 	})
 	if err != nil {
-		reason := "upstream_error"
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-			reason = "interrupted"
-		}
-		_ = s.output.SendEvent(context.Background(), voice.ServerEvent{
-			Type: voice.EventPlaybackEnd, PlaybackID: playbackID, Reason: reason,
-		})
-		if reason == "upstream_error" {
-			_ = s.sendVoiceError(context.Background(), voice.ErrorTTSUnavailable, "语音合成暂时不可用", true, turnID)
+			endReason = "interrupted"
+		} else if outputErr == nil {
+			ttsUnavailable = true
 		}
 		return err
 	}
@@ -381,9 +423,8 @@ func (s *voiceSession) streamPlayback(ctx context.Context, playbackID, kind stri
 			return err
 		}
 	}
-	return s.output.SendEvent(ctx, voice.ServerEvent{
-		Type: voice.EventPlaybackEnd, PlaybackID: playbackID, Reason: "completed",
-	})
+	endReason = "completed"
+	return nil
 }
 
 func (s *voiceSession) stopPlayback(reason string) {

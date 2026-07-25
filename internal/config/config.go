@@ -34,6 +34,7 @@ type Config struct {
 	VolcengineTTSResourceID        string
 	VolcengineTTSSpeaker           string
 	VolcengineASRTimeout           time.Duration
+	VolcengineASRFinalTimeout      time.Duration
 	VolcengineTTSFirstFrameTimeout time.Duration
 	VolcengineTTSTotalTimeout      time.Duration
 	VoiceMaxUtteranceDuration      time.Duration
@@ -85,6 +86,9 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("parse AI_TIMEOUT: %w", err)
 	}
 	if cfg.VolcengineASRTimeout, err = parsePositiveDuration("VOLCENGINE_ASR_TIMEOUT", "20s"); err != nil {
+		return Config{}, err
+	}
+	if cfg.VolcengineASRFinalTimeout, err = parsePositiveDuration("VOLCENGINE_ASR_FINAL_TIMEOUT", "8s"); err != nil {
 		return Config{}, err
 	}
 	if cfg.VolcengineTTSFirstFrameTimeout, err = parsePositiveDuration("VOLCENGINE_TTS_FIRST_FRAME_TIMEOUT", "10s"); err != nil {

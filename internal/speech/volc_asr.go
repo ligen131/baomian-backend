@@ -43,10 +43,11 @@ func (c *VolcASRClient) Open(ctx context.Context) (ASRSession, error) {
 		return nil, err
 	}
 	session := &volcASRSession{
-		connection: connection,
-		timeout:    c.config.ASRTimeout,
-		requestID:  requestID,
-		done:       make(chan struct{}),
+		connection:   connection,
+		timeout:      c.config.ASRTimeout,
+		finalTimeout: c.config.ASRFinalTimeout,
+		requestID:    requestID,
+		done:         make(chan struct{}),
 	}
 	if err := session.configure(ctx); err != nil {
 		_ = connection.Close()
@@ -58,9 +59,10 @@ func (c *VolcASRClient) Open(ctx context.Context) (ASRSession, error) {
 }
 
 type volcASRSession struct {
-	connection *websocket.Conn
-	timeout    time.Duration
-	requestID  string
+	connection   *websocket.Conn
+	timeout      time.Duration
+	finalTimeout time.Duration
+	requestID    string
 
 	mu          sync.Mutex
 	buffer      []byte
@@ -143,7 +145,11 @@ func (s *volcASRSession) Complete(ctx context.Context) (string, error) {
 	}
 	s.mu.Unlock()
 
-	timer := time.NewTimer(s.timeout)
+	finalTimeout := s.finalTimeout
+	if finalTimeout <= 0 {
+		finalTimeout = s.timeout
+	}
+	timer := time.NewTimer(finalTimeout)
 	defer timer.Stop()
 	select {
 	case <-s.done:
@@ -152,7 +158,7 @@ func (s *volcASRSession) Complete(ctx context.Context) (string, error) {
 		return "", ctx.Err()
 	case <-timer.C:
 		_ = s.Close()
-		return "", context.DeadlineExceeded
+		return "", &UpstreamError{Service: "asr", Code: "timeout", RequestID: s.requestID, Retryable: true}
 	}
 
 	s.mu.Lock()
