@@ -177,8 +177,6 @@ func (o *websocketVoiceOutput) enqueue(ctx context.Context, message voiceOutboun
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	default:
-		return errors.New(voice.ErrorDeviceTooSlow)
 	}
 }
 

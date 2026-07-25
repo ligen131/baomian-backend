@@ -381,16 +381,19 @@ func (s *voiceSession) streamPlayback(ctx context.Context, playbackID, kind stri
 		Type: voice.EventPlaybackStart, PlaybackID: playbackID, Kind: kind,
 		Turn: turn, TurnID: turnID, Text: text,
 	}); err != nil {
+		s.logPlaybackStage(playbackID, kind, turnID, "start_failed", err)
 		return err
 	}
+	s.logPlaybackStage(playbackID, kind, turnID, "started", nil)
 	endReason := "upstream_error"
 	var ttsUnavailable bool
 	defer func() {
-		_ = s.output.SendEvent(context.Background(), voice.ServerEvent{
+		endErr := s.output.SendEvent(s.context, voice.ServerEvent{
 			Type: voice.EventPlaybackEnd, PlaybackID: playbackID, Reason: endReason,
 		})
+		s.logPlaybackStage(playbackID, kind, turnID, "ended:"+endReason, endErr)
 		if ttsUnavailable {
-			_ = s.sendVoiceError(context.Background(), voice.ErrorTTSUnavailable, "语音合成暂时不可用", true, turnID)
+			_ = s.sendVoiceError(s.context, voice.ErrorTTSUnavailable, "语音合成暂时不可用", true, turnID)
 		}
 	}()
 
@@ -427,6 +430,17 @@ func (s *voiceSession) streamPlayback(ctx context.Context, playbackID, kind stri
 	return nil
 }
 
+func (s *voiceSession) logPlaybackStage(playbackID, kind, turnID, result string, err error) {
+	if s.service.logger == nil {
+		return
+	}
+	errorCategory := ""
+	if err != nil {
+		errorCategory = "output_unavailable"
+	}
+	s.service.logger.Info("voice playback stage", "deviceId", s.deviceID, "turnId", turnID, "playbackId", playbackID, "kind", kind, "result", result, "errorCategory", errorCategory)
+}
+
 func (s *voiceSession) stopPlayback(reason string) {
 	s.mu.Lock()
 	cancel := s.cancelPlayback
@@ -436,7 +450,7 @@ func (s *voiceSession) stopPlayback(reason string) {
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
-		_ = s.output.SendEvent(context.Background(), voice.ServerEvent{
+		_ = s.output.SendEvent(s.context, voice.ServerEvent{
 			Type: voice.EventPlaybackStop, PlaybackID: playbackID, Reason: reason,
 		})
 	}
