@@ -98,7 +98,8 @@ func (s *ConversationService) PrepareVoiceSession(ctx context.Context, userID, d
 		if err != nil {
 			return err
 		}
-		reason, blocked := demoConversationRestartPolicy(session, now)
+		var blocked bool
+		reason, blocked = demoConversationRestartPolicy(session, now)
 		if blocked {
 			return NewError("request_in_progress", "上一轮倾诉正在处理中", nil)
 		}
