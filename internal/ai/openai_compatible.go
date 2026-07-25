@@ -82,8 +82,8 @@ func (a *OpenAICompatibleAdapter) Generate(ctx context.Context, request Request)
 		Model:     a.model,
 		MaxTokens: 4096,
 		Messages: []chatCompletionMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: "请根据以下结构化输入生成本轮回复：\n" + string(input)},
+			{Role: "system", Content: systemPromptFor(request.Mode)},
+			{Role: "user", Content: userInstructionFor(request.Mode) + string(input)},
 		},
 		ResponseFormat: chatResponseFormat{
 			Type: "json_schema",

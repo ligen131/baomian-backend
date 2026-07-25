@@ -17,13 +17,24 @@ type Store interface {
 	UpdateProfile(ctx context.Context, profile *model.Profile) error
 	GetOrCreateTonight(ctx context.Context, userID string, date time.Time, forUpdate bool) (*model.NightSession, error)
 	UpdateNightSession(ctx context.Context, session *model.NightSession) error
+	CreateConversationRun(ctx context.Context, run *model.ConversationRun) error
+	GetConversationRun(ctx context.Context, userID string, runID uuid.UUID, forUpdate bool) (*model.ConversationRun, error)
+	GetActiveConversationRun(ctx context.Context, userID, deviceID string, forUpdate bool) (*model.ConversationRun, error)
+	GetLatestConversationRun(ctx context.Context, userID, deviceID string) (*model.ConversationRun, error)
+	UpdateConversationRun(ctx context.Context, run *model.ConversationRun) error
 	CreateConversationTurn(ctx context.Context, turn *model.ConversationTurn) error
+	ListConversationTurnsByRun(ctx context.Context, runID uuid.UUID) ([]model.ConversationTurn, error)
+	GetConversationTurnByRunRequestID(ctx context.Context, runID uuid.UUID, clientRequestID, role string) (*model.ConversationTurn, error)
+	DeleteConversationTurnsByRun(ctx context.Context, runID uuid.UUID) error
+	DeleteIncompleteConversationTurnsByRun(ctx context.Context, runID uuid.UUID) error
 	ListConversationTurns(ctx context.Context, sessionID uuid.UUID) ([]model.ConversationTurn, error)
 	GetLatestUserTurn(ctx context.Context, sessionID uuid.UUID) (*model.ConversationTurn, error)
 	GetConversationTurnByClientRequestID(ctx context.Context, sessionID uuid.UUID, clientRequestID, role string) (*model.ConversationTurn, error)
 	DeleteConversationTurns(ctx context.Context, sessionID uuid.UUID) error
 	GetMemoryCardBySession(ctx context.Context, sessionID uuid.UUID) (*model.MemoryCard, error)
 	DeleteMemoryCardBySession(ctx context.Context, sessionID uuid.UUID) error
+	GetMemoryCardByRun(ctx context.Context, runID uuid.UUID) (*model.MemoryCard, error)
+	CreateMemoryCard(ctx context.Context, card *model.MemoryCard) error
 	DeleteOpenDeviceCommands(ctx context.Context, userID, deviceID string) error
 	UpsertMemoryCard(ctx context.Context, card *model.MemoryCard) error
 	ListMemoryCards(ctx context.Context, userID string, limit int) ([]model.MemoryCard, error)

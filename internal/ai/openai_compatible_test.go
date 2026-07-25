@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -53,6 +54,29 @@ func TestOpenAICompatibleAdapterGenerate(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleAdapterUsesJournalPromptForJournalMode(t *testing.T) {
+	server := newOpenAICompatibleTestServer(t, func(t *testing.T, request map[string]any) {
+		messages, ok := request["messages"].([]any)
+		if !ok || len(messages) != 2 {
+			t.Fatalf("messages = %#v", request["messages"])
+		}
+		systemText, _ := messages[0].(map[string]any)["content"].(string)
+		if !strings.Contains(systemText, "晚安日记编辑") || strings.Contains(systemText, "本轮任务") {
+			t.Fatalf("journal system prompt = %q", systemText)
+		}
+		userText, _ := messages[1].(map[string]any)["content"].(string)
+		if !strings.Contains(userText, "完整对话整理晚安日记") {
+			t.Fatalf("journal user instruction = %q", userText)
+		}
+	})
+	defer server.Close()
+
+	adapter := NewOpenAICompatibleAdapter("", "test-token", server.URL, "claude-opus-4-8", server.Client())
+	if _, err := adapter.Generate(context.Background(), Request{Mode: ModeJournal, Turns: []Turn{{Role: "user", Text: "今天有点累"}}}); err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+}
+
 func TestOpenAICompatibleAdapterBaseURLWithV1(t *testing.T) {
 	server := newOpenAICompatibleTestServer(t, nil)
 	defer server.Close()
@@ -62,16 +86,16 @@ func TestOpenAICompatibleAdapterBaseURLWithV1(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatibleAdapterForcesThirdTurnFinalize(t *testing.T) {
+func TestOpenAICompatibleAdapterDoesNotForceThirdTurnFinalize(t *testing.T) {
 	server := newOpenAICompatibleTestServer(t, nil)
 	defer server.Close()
 	adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL, "claude-opus-4-8", server.Client())
-	result, err := adapter.Generate(context.Background(), Request{TurnIndex: 3, Text: "还是有点担心"})
+	result, err := adapter.Generate(context.Background(), Request{Mode: ModeReply, TurnIndex: 3, Text: "还是有点担心"})
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if !result.ShouldFinalize {
-		t.Fatal("third turn must finalize even if the model returns false")
+	if result.ShouldFinalize {
+		t.Fatal("third turn unexpectedly finalized")
 	}
 }
 

@@ -49,13 +49,15 @@ func TestFallbackPersonaStyles(t *testing.T) {
 	}
 }
 
-func TestThirdTurnFinalizes(t *testing.T) {
-	result, err := NewFallbackAdapter().Generate(context.Background(), Request{Text: "还有一点担心", TurnIndex: 3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.ShouldFinalize {
-		t.Fatal("third turn must finalize")
+func TestReplyModeNeverFinalizesByTurnCount(t *testing.T) {
+	for _, turn := range []int{3, 4, 10} {
+		result, err := NewFallbackAdapter().Generate(context.Background(), Request{Mode: ModeReply, Text: "还有一点担心", TurnIndex: turn})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.ShouldFinalize {
+			t.Fatalf("turn %d unexpectedly finalized", turn)
+		}
 	}
 }
 

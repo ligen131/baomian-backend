@@ -156,15 +156,8 @@ func (c *Coordinator) Scan(ctx context.Context) error {
 	return nil
 }
 
-func conversationDue(session *model.NightSession, now time.Time) bool {
-	if session.ConversationTurns < 3 {
-		return false
-	}
-	if session.ConversationProcessingUntil != nil && now.Before(*session.ConversationProcessingUntil) {
-		return false
-	}
-	return session.ConversationHardDeadlineAt != nil && !now.Before(*session.ConversationHardDeadlineAt) ||
-		session.ConversationSilenceDeadlineAt != nil && !now.Before(*session.ConversationSilenceDeadlineAt)
+func conversationDue(_ *model.NightSession, _ time.Time) bool {
+	return false
 }
 
 func coordinatorResult(ctx context.Context, tx repository.Store, session *model.NightSession) (dto.AIResult, error) {

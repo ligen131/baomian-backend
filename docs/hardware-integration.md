@@ -1,455 +1,307 @@
-# 抱眠硬件（T5）与后端对接文档
+# 抱眠硬件（T5）连续对话联调协议
 
-> 文档版本：P1 Voice Streaming / 2026-07-24
-> 线上 API Base URL：`https://bm.lg.gl/api/v1`
+> 文档版本：Continuous Demo Target / 2026-07-25
+> 状态：后端已实现，待部署环境验证与 T5 固件联调
+> API Base URL：`https://bm.lg.gl/api/v1`
 
-## 1. 对接总览
+完整设计和后端数据语义见 [`voice-streaming-design.md`](voice-streaming-design.md)。本文主要描述 T5 固件联调顺序；前端独立文本试听使用 `POST /api/v1/tts/stream`，它不进入硬件会话、不增加对话轮数，也不生成晚安日记。
 
-T5 使用三类后端链路：
+## 1. 演示操作
 
-1. **实时语音 WebSocket**：长按说话、PCM 上行、TTS PCM 下行、边收边播、打断和三轮完成。
-2. **HTTPS 设备接口**：heartbeat、闭仓、开仓和晨光事件。
-3. **HTTPS 命令队列**：晨光、闹钟及非实时设备控制，lease + at-least-once 投递。
+板载按钮语义：
 
-```text
-T5 PCM -> Device Voice WebSocket -> Baomian -> Volcengine ASR
-                                         -> Claude
-T5 PCM <- Device Voice WebSocket <- Baomian <- Volcengine TTS
-
-T5 -> heartbeat/events -> state machine -> Android state WebSocket
-T5 <- command next/ack <- reliable command queue
-```
-
-T5 不连接火山引擎、不保存火山引擎 Token、不解析 Claude 响应，也不缓存完整录音。
-
-## 2. 标识与认证边界
-
-| 字段 | 示例 | 说明 |
-|---|---|---|
-| `deviceId` | `expo-device-001` | 设备唯一 ID，重启后不变 |
-| `userId` | `expo-user-001` | 当前 Demo 绑定用户 |
-| `firmwareVersion` | `1.1.0` | heartbeat 上报 |
-
-当前 MVP 仍是 Demo User，尚无正式设备证书。所有公网连接必须使用 HTTPS/WSS；不要在固件内加入火山引擎或 Claude 凭证。
-
-## 3. 实时语音 WebSocket
-
-### 3.1 连接
-
-```text
-wss://bm.lg.gl/api/v1/device/voice?deviceId=<URL encoded deviceId>&userId=<URL encoded userId>
-```
-
-- `deviceId` 必填；`userId` 可省略并使用后端默认 Demo User，但联调建议显式传入。
-- 同一 `deviceId` 只允许一条活跃连接；新连接替换旧连接。
-- 使用标准 WebSocket ping/pong。固件必须回复 ping，并在断线后指数退避重连。
-- 建议重连：`1s -> 2s -> 4s -> 8s -> 15s -> 15s...`。
-- 后端未配置火山引擎 ASR App ID、ASR Access Token 或 TTS API Key 时，upgrade 前返回 HTTP 503 `speech_not_configured`。
-- 生产设备启动只发送 heartbeat（未来可增加独立 `device.boot`）；不要把每次启动伪造成 `box_closed`，只有仓盖真实稳定关闭时才上报该事件。
-- 固定演示环境可开启 `DEMO_CONTINUOUS_CONVERSATION`。仅当 `userId/deviceId` 精确匹配后端配置时，Voice 建连会在首帧前把已过期或已完成的演示会话轮转为 `LOCKED + 0`；默认关闭且不影响生产恢复语义。
-
-| WebSocket message type | 内容 |
+| 操作 | 业务语义 |
 |---|---|
-| Text | UTF-8 JSON control event |
-| Binary | raw PCM audio，不含 header |
-| Ping/Pong | 标准连接保活 |
+| 按住 RESET | 新的 `box_closed`；开始一场演示 run |
+| 按住 KEY | 结束所有 AI 对话；生成晚安日记并播放睡眠引导 |
 
-火山引擎使用自己的 V3 binary protocol；T5 不收发或解析任何上游供应商事件。后端会把 10 个 20 ms T5 帧聚合成约 200 ms 的 ASR 上游包，T5 固件仍严格发送 960-byte 帧。
+每轮对话不需要用户按键：开场白或 AI 回复播放结束后，T5 自动录音；本地 VAD 检测到说话后的持续静默时自动结束录音。
 
-### 3.2 固定音频格式
+板载 RESET 不是数据库 reset。数据库测试重置只能在服务器上运行受保护脚本。
+
+## 2. 完整时序
+
+```text
+T5                         Baomian                    Volcengine / Claude
+ | POST box_closed              |                              |
+ |----------------------------->|                              |
+ | GET /device/voice (upgrade)  |                              |
+ |----------------------------->|                              |
+ |<------ session.ready --------|                              |
+ |------ session.start -------->|                              |
+ |<----- playback.start --------|--- opening text → TTS ------>|
+ |<========= PCM ===============|<========= PCM ===============|
+ |<------ playback.end ---------|                              |
+ |                              |                              |
+ |------ input.start ---------->|------ ASR open ------------->|
+ |<----- input.accepted --------|                              |
+ |========= PCM ===============>|========= PCM ===============>|
+ |------ input.end ------------>|------ ASR final ------------>|
+ |<---- transcript.final -------|                              |
+ |<--------- thinking ----------|--------- Claude ------------>|
+ |<----- playback.start --------|--------- reply TTS --------->|
+ |<========= PCM ===============|<========= PCM ===============|
+ |<------ playback.end ---------|                              |
+ |                              |                              |
+ | 自动重复 input.start ...                                    |
+ |                              |                              |
+ |--- conversation.finish ----->|-- summarize + append journal |
+ |<-- conversation.completed ---|                              |
+ |<----- playback.start --------|-- stream sleep asset         |
+ |<========= PCM ===============|                              |
+ |<------ playback.end ---------|                              |
+ | 本次工作结束                  |                              |
+```
+
+## 3. 固定音频格式
 
 | 参数 | 值 |
 |---|---|
-| 编码 | PCM signed linear |
-| 字节序 | little-endian |
+| 编码 | raw PCM signed 16-bit little-endian |
 | 采样率 | 24000 Hz |
-| 位深 | 16 bit |
 | 声道 | mono |
 | 帧长 | 20 ms |
-| 每条 binary message | 960 bytes |
+| 每个 binary message | 960 bytes |
 
-计算：`24000 * 0.02 * 2 = 960 bytes`。不发送 WAV header，不发送半帧；最后一帧不足时在设备侧补零。
+不发送 WAV header。T5 播放使用 100–300 ms 有界缓冲并边收边播。
 
-建议播放环形缓冲 100–300 ms，即 5–15 帧。缓冲必须有界，禁止缓存完整回复。
+## 4. RESET 开始
 
-## 4. 语音控制协议
+T5 每次真实 RESET 长按生成新的 UUID：
 
-每个 T5 上行控制事件包含 `type`、UUID `eventId`；轮次事件还包含 UUID `turnId`。
+```http
+POST /api/v1/device/events
+Content-Type: application/json
 
-### 4.1 建连就绪（后端下行）
+{
+  "eventId":"3db25df5-5f70-48f4-97d7-e823aa1b8bce",
+  "deviceId":"expo-device-001",
+  "userId":"expo-user-001",
+  "type":"box_closed",
+  "payload":{"source":"reset_button"}
+}
+```
+
+网络重试必须复用同一个 `eventId`。下一次新的 RESET 按压才生成新 ID。
+
+随后连接：
+
+```text
+wss://bm.lg.gl/api/v1/device/voice?deviceId=expo-device-001&userId=expo-user-001
+```
+
+首个服务端事件：
 
 ```json
 {
   "type":"session.ready",
+  "runId":"<runId>",
   "phase":"LOCKED",
   "completedTurns":0,
-  "audio":{"codec":"pcm","sampleRate":24000,"bitDepth":16,"channels":1,"frameMs":20}
+  "audio":{"codec":"pcm","sampleRate":24000,"bitDepth":16,"channels":1,"frameMs":20,"frameBytes":960},
+  "recovery":{"runStatus":"active","resumeAction":"listen","guidanceStatus":"pending"},
+  "occurredAt":"2026-07-25T00:00:00Z"
 }
 ```
 
-`completedTurns` 是必填的驼峰字段，必须始终为 JSON number 类型的非负整数；首次会话也必须明确发送 `0`，不能省略、传字符串或 null。固件必须校验 audio 参数。不支持返回格式时停止语音流程并上报诊断，不能按错误采样率播放。
+`completedTurns` 为 JSON number，没有最大值 3。ready 之后所有 T5 JSON 控制事件都必须携带该 `runId`。
 
-正常稳定状态必须满足：`LOCKED=0`、`CONVERSATION=0/1/2`、`CHOOSING_GUIDANCE=3`、`SLEEPING=3`。后端发现历史矛盾状态时会拒绝建立正常语音流程并记录诊断，不会篡改轮数掩盖数据库问题。
-
-### 4.2 开始今晚会话（T5 上行）
-
-闭仓 REST 事件成功并收到 `session.ready` 后发送：
+T5 发送：
 
 ```json
-{"type":"session.start","eventId":"3db25df5-5f70-48f4-97d7-e823aa1b8bce"}
+{"type":"session.start","runId":"<runId>","eventId":"95a777c5-2ceb-4aea-8802-b7ec6b33d7dd"}
 ```
 
-从 `LOCKED` 首次启动时，后端进入 `CONVERSATION` 并播放短开场白。开场白不计入三轮。
+后端使用 TTS 播放：
 
-### 4.3 播放（后端下行）
+> 手机已经放好了。今晚想和眠眠聊聊什么？
+
+T5 必须等待相同 `playbackId` 的 `playback.end`，不能把 `playback.start` 当作播放完成。
+
+## 5. 自动录音
+
+收到 `kind=opening` 或 `kind=reply` 的：
 
 ```json
-{
-  "type":"playback.start",
-  "playbackId":"ca7d3ee8-d79c-4df0-b4e3-ceee2c156ceb",
-  "kind":"opening",
-  "text":"手机已经安放好了。今晚有什么想和眠眠说的吗？"
-}
+{"type":"playback.end","runId":"<runId>","playbackId":"...","reason":"completed","occurredAt":"2026-07-25T00:00:00Z"}
 ```
 
-之后连续收到 960-byte binary PCM，T5 边收边播。完成时收到：
-
-```json
-{"type":"playback.end","playbackId":"ca7d3ee8-d79c-4df0-b4e3-ceee2c156ceb","reason":"completed"}
-```
-
-`kind`：`opening`、`reply`、`guidance`。`reason`：`completed`、`interrupted`、`upstream_error`。
-
-### 4.4 长按开始说话（T5 上行）
-
-按键按下并达到固件长按阈值后：
-
-1. 如果正在播放，立即停止播放器并清空环形缓冲。
-2. 发送 `playback.stop`。
-3. 生成新的 `turnId`。
-4. 发送 `input.start`。
-5. 等待 `input.accepted` 后实时发送 binary PCM；允许极小预录缓冲避免吞掉开头，但不得缓存完整录音。
-
-```json
-{"type":"playback.stop","eventId":"b8391c5d-7746-4705-bb74-4e145749513e"}
-```
+T5 自动执行：
 
 ```json
 {
   "type":"input.start",
+  "runId":"<runId>",
   "eventId":"ff4af57c-64ef-4e29-a6ed-a5f0bf445247",
   "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"
 }
 ```
 
-后端接受：
+检测到首声后发送 `input.start`，同时继续采集。收到：
 
 ```json
-{"type":"input.accepted","turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"}
+{"type":"input.accepted","runId":"<runId>","eventId":"<input.start eventId>","turnId":"8ea4105c-bc68-46de-b625-c49281c6688f","occurredAt":"2026-07-25T00:00:00Z"}
 ```
 
-每次长按最长 60 秒。固件到 60 秒时必须自动结束采集并发送 `input.end`。
+后按 pre-roll → pending → live 顺序发送 PCM，允许短时 burst。
 
-### 4.5 松开结束说话（T5 上行）
+推荐本地 VAD：
+
+- 无首声时本地监听 10 秒；超时只重新监听，不发送 `input.start` 或 `input.end`。
+- 300 ms pre-roll，即 15 个 960-byte 帧。
+- 等待 `input.accepted` 时继续采集，pending 最多 3 秒，即 150 帧、144000 bytes。
+- 出现人声后连续静默 2.5 秒结束本轮。
+- 单轮最多 60 秒。
+
+结束事件：
 
 ```json
 {
   "type":"input.end",
+  "runId":"<runId>",
   "eventId":"53bd7e56-2858-499e-a04d-2182ba299178",
   "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"
 }
 ```
 
-`turnId` 必须与 `input.start` 相同。`input.end` 后后端异步等待 ASR final，不阻塞 WebSocket 控制读循环；默认在 8 秒内发送最终转写或 `error/asr_unavailable`。固件应分别设置 ASR、Claude、TTS 和本地播放等待期限；ASR final 建议至少等待 10–12 秒以保留网络裕量，不能把所有阶段超时都记为“等待 playback.end”。随后后端可能发送：
+后端可能返回：
 
 ```json
-{"type":"transcript.final","turnId":"8ea4105c-bc68-46de-b625-c49281c6688f","text":"今天工作有点累"}
+{"type":"transcript.final","runId":"<runId>","turnId":"8ea4105c-bc68-46de-b625-c49281c6688f","text":"今天工作有点累","occurredAt":"2026-07-25T00:00:00Z"}
 ```
 
 ```json
-{"type":"thinking","turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"}
+{"type":"thinking","runId":"<runId>","turnId":"8ea4105c-bc68-46de-b625-c49281c6688f","occurredAt":"2026-07-25T00:00:00Z"}
 ```
 
-`transcript.final.text` 仅供联调，正式固件可忽略，不得持久化。`thinking` 时允许播放一次很短的本地提示音，不得循环。
+最终 AI 回复仍是：
 
-Claude 回复开始：
-
-```json
-{
-  "type":"playback.start",
-  "playbackId":"7d3cff76-dc99-44ea-b0ae-064d13333a50",
-  "kind":"reply",
-  "turn":1,
-  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f",
-  "text":"辛苦了，今晚先不用急着把所有事情解决。"
-}
+```text
+playback.start(runId=<runId>, kind=reply, turnId=同一 turnId, audio.frameBytes=960)
+→ binary PCM × N
+→ playback.end(runId=<runId>, reason=completed)
 ```
 
-### 4.6 短按静音
+回复结束后自动开始下一轮录音。不限三轮，直到 KEY 结束。
 
-短按时固件必须先本地立即停止并清空播放缓冲，然后发送：
+## 6. KEY 结束
 
-```json
-{"type":"playback.stop","eventId":"587c89f0-97b4-4892-b5ab-564977b947fe"}
-```
-
-不要等待后端 ACK 才停止声音。
-
-### 4.7 后端要求停止
+KEY 长按时，不论正在录音、思考还是播放，T5 都先停止本地采集/播放并清空缓冲，然后发送：
 
 ```json
 {
-  "type":"playback.stop",
-  "playbackId":"7d3cff76-dc99-44ea-b0ae-064d13333a50",
-  "reason":"user_interrupt"
+  "type":"conversation.finish",
+  "runId":"<runId>",
+  "eventId":"b8391c5d-7746-4705-bb74-4e145749513e"
 }
 ```
 
-收到后立即清空缓冲。每个已收到的 `playback.start` 都会对应一次相同 `playbackId` 的 `playback.end` 尝试：正常为 `completed`，打断为 `interrupted`，TTS 或输出链路失败为 `upstream_error`。连接已经断开时终止帧可能无法抵达，固件仍需在 socket close 时清空本地播放状态。
-
-### 4.8 三轮完成
-
-三轮表示 3 次有效用户发言，不含开场白。第三轮晚安日记持久化后收到：
+后端仅总结已经完整保存的轮次，并追加一篇晚安日记。成功后发送：
 
 ```json
 {
   "type":"conversation.completed",
-  "completedTurns":3,
+  "runId":"<runId>",
+  "eventId":"b8391c5d-7746-4705-bb74-4e145749513e",
+  "completedTurns":6,
   "journalId":"6d1e52fc-46ec-447c-89c6-21a021fb1fb9",
-  "guidance":"breathing_46"
+  "guidance":"rain",
+  "occurredAt":"2026-07-25T00:00:00Z"
 }
 ```
 
-随后自动开始引导。同一逻辑会话到此结束，不能继续发送第四轮。演示连续模式下如需继续测试，应先断开并重新连接 Voice WebSocket；后端确认该固定演示身份的会话已经完成后，新的第一帧会是 `session.ready`、`LOCKED + 0`。
-
-### 4.9 白噪音（T5 内置）
-
-```json
-{"type":"guidance.start","guidance":"rain","source":"device","durationMinutes":20}
-```
-
-- `rain`、`brown_noise` 必须内置为可无缝循环资源。
-- 按 `durationMinutes` 在本地停止。
-- 短按立即停止。
-- `breathing_46` 不使用内置资源，由后端按 `kind=guidance` 流式发送 PCM。
-- `silence` 不发送音频。
-
-### 4.10 错误
+接着流式播放睡眠引导：
 
 ```json
 {
-  "type":"error",
-  "code":"asr_unavailable",
-  "message":"语音识别暂时不可用，请重新说一次",
-  "retryable":true,
-  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"
+  "type":"playback.start",
+  "runId":"<runId>",
+  "playbackId":"17fb2836-d46d-485a-890d-0fc20359a7fa",
+  "kind":"guidance",
+  "guidance":"rain",
+  "audio":{"codec":"pcm","sampleRate":24000,"bitDepth":16,"channels":1,"frameMs":20,"frameBytes":960},
+  "occurredAt":"2026-07-25T00:00:00Z"
 }
 ```
 
-| code | 是否重试 | 固件行为 |
-|---|---:|---|
-| `speech_not_configured` | 否 | 停止语音流程并上报配置故障 |
-| `invalid_phase` | 否 | 刷新连接或等待真实状态变化 |
-| `invalid_event` | 否 | 记录协议错误，修复固件 |
-| `invalid_audio_frame` | 是 | 检查必须为 960 bytes |
-| `turn_in_progress` | 是 | 不并发开始第二轮 |
-| `turn_too_long` | 是 | 结束采集，提示重新简短表达 |
-| `conversation_limit` | 否 | 等待引导 |
-| `asr_unavailable` | 是 | 用户重新说一次 |
-| `empty_transcript` | 是 | 用户重新说一次 |
-| `ai_unavailable` | 是 | 保留连接，稍后重试同一 `turnId` |
-| `tts_unavailable` | 是 | 不阻塞晚安日记，允许后续流程 |
-| `device_too_slow` | 是 | 缩短本地处理路径并重连 |
+临时映射：
 
-## 5. 断线与幂等
+- `rain`：服务器 `~/tmp/rainy.wav`
+- `breathing_46`：服务器 `~/tmp/miao.mp3`
 
-- `input.end` 前断线：后端丢弃本轮；重连后使用新 `turnId` 重说。
-- `input.end` 后超时且结果不确定：重连后可复用相同 `turnId`；后端以 `clientRequestId` 防止重复增加轮数。
-- `session.ready.completedTurns` 和 `phase` 来自数据库；生产模式重连恢复当前有效会话，不自动 reset。
-- 演示连续模式只会轮转已超过硬截止且没有活跃 processing lease 的 `CONVERSATION`，或已经三轮完成的 `CHOOSING_GUIDANCE/SLEEPING`；有效会话仍按原轮次恢复。
-- 后端重启不恢复半段 PCM；已经持久化的 turn 不重复调用 Claude。
-- 每个控制动作生成唯一 `eventId`；同一动作网络重试复用原 ID。
+后端负责解码并统一输出 24 kHz/16-bit/mono PCM。收到 guidance 的 `playback.end(reason=completed)` 后，T5 不再录音，本次工作结束。
 
-## 6. Heartbeat
+## 7. 控制事件表
 
-每 30–60 秒及网络恢复后调用：
+T5 → 后端：
 
-```http
-POST https://bm.lg.gl/api/v1/device/heartbeat
-Content-Type: application/json
+| type | 时机 |
+|---|---|
+| `session.start` | RESET 流程中，收到 `session.ready` 后 |
+| `input.start` | opening/reply 正常播放完毕后自动发送 |
+| `input.end` | 已检测首声后出现 2.5 秒尾静默，或达到 60 秒上限 |
+| `playback.stop` | 本地需要中断当前播放时 |
+| `conversation.finish` | KEY 长按，结束当前 run |
 
-{
-  "deviceId":"expo-device-001",
-  "userId":"expo-user-001",
-  "firmwareVersion":"1.1.0",
-  "capabilities":{
-    "voiceWebSocket":true,
-    "pcm24000Mono":true,
-    "audioPlayback":true,
-    "sunrise":true,
-    "builtInGuidance":["rain","brown_noise"]
-  },
-  "status":{"boxClosed":true,"audioPlaying":false},
-  "localTime":"2026-07-24T22:30:00+08:00"
-}
-```
+后端 → T5：
 
-最近 90 秒收到 heartbeat 或设备事件时，后端认为设备 online。
+| type | 作用 |
+|---|---|
+| `session.ready` | 会话与音频格式就绪 |
+| `input.accepted` | 可以上传当前 turn PCM |
+| `transcript.final` | 联调可见的最终转写 |
+| `thinking` | Claude 正在生成 |
+| `playback.start` | 后续 binary PCM 属于该 playback |
+| `playback.stop` | 立即清空本地播放缓冲 |
+| `playback.end` | 该 playback 的唯一终态 |
+| `conversation.completed` | 日记已追加，准备播放睡眠引导 |
+| `error` | 稳定错误事件 |
 
-## 7. 持久设备事件
+## 8. 连接关闭与错误处理
 
-```http
-POST https://bm.lg.gl/api/v1/device/events
-Content-Type: application/json
+- WebSocket close code `1008`：停止本次自动对话循环，不自动重连。
+- close code `1011` 或网络错误：按退避策略重连，并以 `session.ready.recovery.resumeAction` 恢复。
+- 每个 `playback.start` 必须由同一 `playbackId` 的 `playback.end`、关联该 playback 的结构化 `error` 或 WebSocket close 三者之一终结。
+- guidance 中断后重连从素材开头播放，不做字节偏移续传。
 
-{
-  "eventId":"2f83458a-caa1-4ef0-a78f-d3d2810254de",
-  "deviceId":"expo-device-001",
-  "userId":"expo-user-001",
-  "type":"box_closed",
-  "payload":{},
-  "occurredAt":"2026-07-24T14:30:00Z"
-}
-```
+| code | T5 行为 |
+|---|---|
+| `empty_transcript` | 短暂提示后自动重新录音 |
+| `asr_unavailable` | 保持连接并自动重试新 turn |
+| `ai_unavailable` | 保持连接；可重试或等待 KEY |
+| `tts_unavailable` | 结束当前 playback；可重试或等待 KEY |
+| `turn_in_progress` | 不并发开启第二个 turn |
+| `invalid_audio_frame` | 修复为恰好 960 bytes |
+| `finish_in_progress` | 等待 `conversation.completed`，不更换 finish eventId |
+| `journal_unavailable` | 不开始睡眠引导；安全重试相同 finish eventId |
 
-| type | 场景 | 行为 |
-|---|---|---|
-| `box_closed` | 仓盖稳定关闭 | 进入或恢复 `LOCKED` 等阶段；随后连接 Voice WebSocket |
-| `box_opened` | 仓盖稳定打开 | 进入 `PHONE_REMOVED`，停止实时播放 |
-| `soft_button/short_press` | 非语音连接或晨光兼容事件 | 晨光中贪睡；其他阶段停止音频 |
-| `soft_button/long_press` | `SUNRISE` | 标记起床并产生 `alarm.stop` |
-| `alarm_start` | 本地 RTC 到点 | 进入 `SUNRISE` |
+Voice socket 关闭时立即停止录音和播放。任何错误都不能导致无限缓存 PCM。
 
-重要：
+## 9. 日记与数据库 reset
 
-- `CONVERSATION` 中长按说话不用 REST `soft_button/long_press`，必须使用 Voice WebSocket 的 `input.start`/`input.end`。
-- `SUNRISE` 中长按仍上报 REST `soft_button/long_press`。
-- 固件必须根据本地模式和 `session.ready.phase` 区分语义。
-- 仓盖去抖建议 300–500 ms；同一次物理事件重试复用 `eventId`，此时响应 `duplicate=true`。
-- 如果真实仓盖再次稳定关闭且固件丢失原 `eventId`，在后端已经记录闭仓的稳定阶段上报新 `box_closed`，后端也返回 200 和当前状态，但 `commands=[]` 且不会重复播放确认音；真正需要恢复状态时仍执行正常迁移，真正冲突仍返回 409。设备单纯重启不得借此伪造仓盖变化或重置对话。
-- 事件响应中的 `commands` 不直接执行；统一通过命令队列领取，避免重复执行。
-
-## 8. 命令队列
-
-领取：
+每次 KEY 成功完成都会创建新的日记，即使同一天已经存在其他日记也不能覆盖。前端继续调用：
 
 ```http
-GET https://bm.lg.gl/api/v1/device/commands/next?deviceId=expo-device-001&timeoutSec=20
+GET /api/v1/journals?limit=7
 ```
 
-- 200：一条命令。
-- 204：正常空结果，立即发起下一次轮询。
-- 同一设备只能有一个长轮询。
-- `leaseExpiresAt` 前未 ACK 会重投，`attempt` 递增，默认最多 5 次。
-- 固件在 NVS/Flash 保存有限大小的已完成 command ID；重复命令不重复产生副作用，但仍回复 ACK。
+不增加 `/journals/tonight`。
 
-ACK：
+服务器测试数据库 reset 会预置 `D-3`、`D-2`、`D-1` 三篇固定演示日记，具体文案见 [`voice-streaming-design.md`](voice-streaming-design.md#10-数据库测试-reset-和三篇种子日记)。重复 reset 不得重复插入种子。
 
-```http
-POST https://bm.lg.gl/api/v1/device/commands/ack
-Content-Type: application/json
+## 10. 固件验收清单
 
-{
-  "deviceId":"expo-device-001",
-  "commandId":"9b5a6fea-d00a-4fb7-b35a-70a0e23b40ee",
-  "success":true,
-  "payload":{"firmwareVersion":"1.1.0","durationMs":138}
-}
-```
-
-常见命令：`audio.confirm`、`audio.play`、`audio.pause`、`audio.stop`、`led.off`、`sunrise.start`、`alarm.snooze`、`alarm.stop`。实时 Claude 回复和呼吸引导不经过命令队列。
-
-## 9. 完整睡前流程
-
-1. T5 heartbeat。
-2. 用户放入手机并闭仓。
-3. T5 POST `box_closed`。
-4. T5 建立 Device Voice WebSocket。
-5. 收到 `session.ready` 后发送 `session.start`。
-6. T5 边收边播开场白。
-7. 用户长按，T5 发送 `input.start` 和 PCM；松开发送 `input.end`。
-8. T5 收到 Claude reply PCM 并边收边播。
-9. 重复至 3 次有效用户发言。
-10. 收到 `conversation.completed`。
-11. 收到 `guidance.start` 播放内置白噪音，或接收 `kind=guidance` 的呼吸 PCM。
-12. 短按可随时本地停止声音。
-13. 开仓时 POST `box_opened` 并断开或暂停语音连接。
-
-## 10. 服务器本机测试重置
-
-同一测试 `userId` 在同一天重连时恢复已有 NightSession 是正常行为。需要从 `WAITING_TO_LOCK` 重新跑完整硬件流程时，在后端服务器本机先预览：
-
-```bash
-make reset-test-session USER_ID=expo-user-001 DEVICE_ID=expo-device-001
-```
-
-确认后再显式执行：
-
-```bash
-./scripts/reset-test-session.sh \
-  --user expo-user-001 \
-  --device expo-device-001 \
-  --apply \
-  --confirm RESET-TONIGHT
-```
-
-该脚本不对公网开放，只清理指定测试身份当天的会话、关联对话/记忆卡和未完成设备命令；不会删除 Profile、Device、历史记录、已完成命令或 DeviceEvent 审计。正式用户不使用此脚本。
-
-## 11. 晨光流程
-
-1. 本地 RTC 到点，POST `alarm_start`。
-2. 领取并 ACK `sunrise.start`。
-3. 短按：POST `soft_button/short_press`，领取 `alarm.snooze`，本地安排 5 分钟。
-4. 长按：POST `soft_button/long_press`，领取 `alarm.stop`。
-5. 断网时本地闹钟仍必须可用。
-
-## 11. 固件状态建议
-
-持久化：
-
-```text
-device_id
-bound_user_id
-firmware_version
-pending_event_queue[]
-completed_command_ids[]
-pending_ack
-local_alarm/snooze_state
-```
-
-内存：
-
-```text
-voice_ws_state
-server_phase
-current_turn_id
-current_playback_id
-capture_ring_buffer
-playback_ring_buffer
-input_active
-audio_playing
-box_state
-network_backoff
-```
-
-不得持久化完整录音、`transcript.final.text`、Claude 回复全文、火山引擎 App ID/Access Token 或 Claude Token。
-
-## 12. 联调验收清单
-
-- [ ] `deviceId` 重启后不变，Android 和 T5 使用相同 `userId`。
-- [ ] PCM 采集和播放均为 24kHz/16-bit/mono/little-endian。
-- [ ] 每条上行 binary message 恰好 960 bytes。
-- [ ] 播放缓冲为 100–300 ms 且有界。
-- [ ] 长按开始、松开结束；单次 60 秒自动结束。
-- [ ] 短按无需等待网络即可立即静音。
-- [ ] 播放中长按能清空旧音频并开始新输入。
-- [ ] 断线重连并正确处理 `session.ready`。
-- [ ] 相同 `turnId` 重试不会增加两轮。
-- [ ] 三轮后收到 `conversation.completed`。
-- [ ] `rain`、`brown_noise` 内置且按时长停止。
-- [ ] 呼吸引导可以边收边播。
-- [ ] REST 事件幂等；command 按 ID 去重并 ACK。
-- [ ] 晨光模式和 Conversation 模式的长按语义正确区分。
-- [ ] 日志中无音频、转写全文和凭证。
-
-机器可读 REST/upgrade 契约见 [`api/openapi.yaml`](../api/openapi.yaml)；完整语音设计见 [`voice-streaming-design.md`](voice-streaming-design.md)。若摘要冲突，以语音设计文档中的冻结协议为准。
+- [ ] RESET 每次新按压产生新 `box_closed eventId`，重试复用旧 ID。
+- [ ] 收到有效 `session.ready` 后发送 `session.start`。
+- [ ] 开场 PCM 能边收边播并等待 `playback.end`。
+- [ ] opening/reply 正常结束后自动录音，不需要按键。
+- [ ] 只在 `input.accepted` 后发送 PCM。
+- [ ] PCM 始终为 960-byte、24 kHz、16-bit、mono、little-endian。
+- [ ] VAD 在首声 10 秒、尾静默 2.5 秒、总长 60 秒三个边界结束录音。
+- [ ] AI 回复播放结束后可连续自动进入任意轮数。
+- [ ] 不在第三轮停止，不处理 `conversation_limit` 为正常完成。
+- [ ] KEY 能在录音/思考/播放任一阶段发送 `conversation.finish`。
+- [ ] `conversation.completed` 后播放 guidance PCM。
+- [ ] guidance 播完后不再录音。
+- [ ] WebSocket 关闭会清空采集和播放状态。
+- [ ] 不持久化完整录音、转写或回复正文。

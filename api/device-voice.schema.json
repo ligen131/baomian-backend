@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bm.lg.gl/api/device-voice.schema.json",
+  "title": "Baomian T5 Voice WebSocket control event",
+  "description": "T5 Voice WebSocket 的权威 JSON 控制消息契约。二进制消息固定为 PCM s16le、24000 Hz、mono、20 ms、960 bytes。",
+  "oneOf": [
+    { "$ref": "#/$defs/sessionReady" },
+    { "$ref": "#/$defs/sessionStart" },
+    { "$ref": "#/$defs/inputStart" },
+    { "$ref": "#/$defs/inputAccepted" },
+    { "$ref": "#/$defs/inputEnd" },
+    { "$ref": "#/$defs/transcriptFinal" },
+    { "$ref": "#/$defs/thinking" },
+    { "$ref": "#/$defs/playbackStart" },
+    { "$ref": "#/$defs/playbackEnd" },
+    { "$ref": "#/$defs/playbackStop" },
+    { "$ref": "#/$defs/conversationFinish" },
+    { "$ref": "#/$defs/conversationCompleted" },
+    { "$ref": "#/$defs/voiceError" }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "audioFormat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codec", "sampleRate", "bitDepth", "channels", "frameMs", "frameBytes"],
+      "properties": {
+        "codec": { "const": "pcm" },
+        "sampleRate": { "const": 24000 },
+        "bitDepth": { "const": 16 },
+        "channels": { "const": 1 },
+        "frameMs": { "const": 20 },
+        "frameBytes": { "const": 960 }
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runStatus", "resumeAction"],
+      "properties": {
+        "runStatus": {
+          "type": "string",
+          "enum": ["active", "finishing", "completed", "aborted"]
+        },
+        "resumeAction": {
+          "type": "string",
+          "enum": ["listen", "wait_turn", "replay_reply", "wait_finish", "replay_guidance", "done"]
+        },
+        "pendingTurnId": { "$ref": "#/$defs/id" },
+        "lastCompletedTurnId": { "$ref": "#/$defs/id" },
+        "finishEventId": { "$ref": "#/$defs/id" },
+        "journalId": { "$ref": "#/$defs/id" },
+        "guidance": {
+          "type": "string",
+          "enum": ["rain", "breathing_46"]
+        },
+        "guidanceStatus": {
+          "type": "string",
+          "enum": ["pending", "playing", "interrupted", "completed"]
+        }
+      }
+    },
+    "sessionReady": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "phase", "completedTurns", "audio", "recovery", "occurredAt"],
+      "properties": {
+        "type": { "const": "session.ready" },
+        "runId": { "$ref": "#/$defs/id" },
+        "phase": { "type": "string" },
+        "completedTurns": { "type": "integer", "minimum": 0 },
+        "audio": { "$ref": "#/$defs/audioFormat" },
+        "recovery": { "$ref": "#/$defs/recovery" },
+        "occurredAt": { "$ref": "#/$defs/occurredAt" }
+      }
+    },
+    "sessionStart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "eventId"],
+      "properties": {
+        "type": { "const": "session.start" },
+        "runId": { "$ref": "#/$defs/id" },
+        "eventId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "inputStart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "eventId", "turnId"],
+      "properties": {
+        "type": { "const": "input.start" },
+        "runId": { "$ref": "#/$defs/id" },
+        "eventId": { "$ref": "#/$defs/id" },
+        "turnId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "inputAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "eventId", "turnId", "occurredAt"],
+      "properties": {
+        "type": { "const": "input.accepted" },
+        "runId": { "$ref": "#/$defs/id" },
+        "eventId": { "$ref": "#/$defs/id" },
+        "turnId": { "$ref": "#/$defs/id" },
+        "occurredAt": { "$ref": "#/$defs/occurredAt" }
+      }
+    },
+    "inputEnd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "eventId", "turnId"],
+      "properties": {
+        "type": { "const": "input.end" },
+        "runId": { "$ref": "#/$defs/id" },
+        "eventId": { "$ref": "#/$defs/id" },
+        "turnId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "transcriptFinal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "turnId", "text", "occurredAt"],
+      "properties": {
+        "type": { "const": "transcript.final" },
+        "runId": { "$ref": "#/$defs/id" },
+        "turnId": { "$ref": "#/$defs/id" },
+        "text": { "type": "string", "minLength": 1 },
+        "occurredAt": { "$ref": "#/$defs/occurredAt" }
+      }
+    },
+    "thinking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "turnId", "occurredAt"],
+      "properties": {
+        "type": { "const": "thinking" },
+        "runId": { "$ref": "#/$defs/id" },
+        "turnId": { "$ref": "#/$defs/id" },
+        "occurredAt": { "$ref": "#/$defs/occurredAt" }
+      }
+    },
+    "playbackStart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "playbackId", "kind", "audio", "occurredAt"],
+      "properties": {
+        "type": { "const": "playback.start" },
+        "runId": { "$ref": "#/$defs/id" },
+        "playbackId": { "$ref": "#/$defs/id" },
+        "kind": {
+          "type": "string",
+          "enum": ["opening", "reply", "guidance"]
+        },
+        "turnId": { "$ref": "#/$defs/id" },
+        "guidance": {
+          "type": "string",
+          "enum": ["rain", "breathing_46"]
+        },
+        "audio": { "$ref": "#/$defs/audioFormat" },
+        "occurredAt": { "$ref": "#/$defs/occurredAt" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "reply" } } },
+          "then": { "required": ["turnId"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "guidance" } } },
+          "then": { "required": ["guidance"] }
+        }
+      ]
+    },
+    "playbackEnd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "playbackId", "reason", "occurredAt"],
+      "properties": {
+        "type": { "const": "playback.end" },
+        "runId": { "$ref": "#/$defs/id" },
+        "playbackId": { "$ref": "#/$defs/id" },
+        "turnId": { "$ref": "#/$defs/id" },
+        "reason": {
+          "type": "string",
+          "enum": ["completed", "interrupted", "failed"]
+        },
+        "occurredAt": { "$ref": "#/$defs/occurredAt" }
+      }
+    },
+    "playbackStop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "playbackId"],
+      "properties": {
+        "type": { "const": "playback.stop" },
+        "runId": { "$ref": "#/$defs/id" },
+        "eventId": { "$ref": "#/$defs/id" },
+        "playbackId": { "$ref": "#/$defs/id" },
+        "reason": { "type": "string", "minLength": 1 },
+        "occurredAt": { "$ref": "#/$defs/occurredAt" }
+      },
+      "anyOf": [
+        { "required": ["eventId"] },
+        { "required": ["occurredAt"] }
+      ]
+    },
+    "conversationFinish": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "eventId"],
+      "properties": {
+        "type": { "const": "conversation.finish" },
+        "runId": { "$ref": "#/$defs/id" },
+        "eventId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "conversationCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "eventId", "completedTurns", "journalId", "guidance", "occurredAt"],
+      "properties": {
+        "type": { "const": "conversation.completed" },
+        "runId": { "$ref": "#/$defs/id" },
+        "eventId": { "$ref": "#/$defs/id" },
+        "completedTurns": { "type": "integer", "minimum": 0 },
+        "journalId": { "$ref": "#/$defs/id" },
+        "guidance": {
+          "type": "string",
+          "enum": ["rain", "breathing_46"]
+        },
+        "occurredAt": { "$ref": "#/$defs/occurredAt" }
+      }
+    },
+    "voiceError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "runId", "code", "message", "retryable", "terminalFor", "occurredAt"],
+      "properties": {
+        "type": { "const": "error" },
+        "runId": { "$ref": "#/$defs/id" },
+        "eventId": { "$ref": "#/$defs/id" },
+        "turnId": { "$ref": "#/$defs/id" },
+        "playbackId": { "$ref": "#/$defs/id" },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" },
+        "retryAfterMs": { "type": "integer", "minimum": 0 },
+        "terminalFor": {
+          "type": "string",
+          "enum": ["event", "turn", "playback", "run"]
+        },
+        "occurredAt": { "$ref": "#/$defs/occurredAt" }
+      }
+    }
+  }
+}

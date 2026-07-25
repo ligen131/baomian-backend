@@ -178,6 +178,102 @@ deleted_sessions AS (
 SELECT
     (SELECT count(*) FROM deleted_sessions) AS deleted_session_count,
     (SELECT count(*) FROM deleted_commands) AS deleted_command_count;
+
+CREATE TEMP TABLE reset_seed_sessions (
+    seed_key TEXT PRIMARY KEY,
+    session_id UUID NOT NULL,
+    run_id UUID NOT NULL,
+    seed_date DATE NOT NULL,
+    emotion TEXT NOT NULL,
+    worry TEXT NOT NULL,
+    tomorrow_task TEXT NOT NULL,
+    comfort TEXT NOT NULL,
+    guidance TEXT NOT NULL
+) ON COMMIT DROP;
+
+INSERT INTO reset_seed_sessions VALUES
+(
+    'D-3',
+    md5(:'user_id' || ':reset-seed:D-3:session')::uuid,
+    md5(:'user_id' || ':reset-seed:D-3:run')::uuid,
+    (CURRENT_TIMESTAMP AT TIME ZONE COALESCE((SELECT p.time_zone FROM profiles p WHERE p.user_id = :'user_id'), 'Asia/Shanghai'))::date - INTERVAL '3 days',
+    '轻松',
+    '今天完成了几件一直惦记的小事，心里松了一些。',
+    '明早列出最重要的一件事',
+    '你已经做得很好，今晚可以放心休息。',
+    'rain'
+),
+(
+    'D-2',
+    md5(:'user_id' || ':reset-seed:D-2:session')::uuid,
+    md5(:'user_id' || ':reset-seed:D-2:run')::uuid,
+    (CURRENT_TIMESTAMP AT TIME ZONE COALESCE((SELECT p.time_zone FROM profiles p WHERE p.user_id = :'user_id'), 'Asia/Shanghai'))::date - INTERVAL '2 days',
+    '疲惫',
+    '工作还有一些没有收尾，担心明天会来不及。',
+    '明早先处理最紧急的十分钟',
+    '剩下的事情交给明天，现在先把自己照顾好。',
+    'breathing_46'
+),
+(
+    'D-1',
+    md5(:'user_id' || ':reset-seed:D-1:session')::uuid,
+    md5(:'user_id' || ':reset-seed:D-1:run')::uuid,
+    (CURRENT_TIMESTAMP AT TIME ZONE COALESCE((SELECT p.time_zone FROM profiles p WHERE p.user_id = :'user_id'), 'Asia/Shanghai'))::date - INTERVAL '1 day',
+    '平静',
+    '明天有新的安排，期待里也带着一点紧张。',
+    '起床后确认今天的第一个安排',
+    '不需要一次准备好所有答案，慢慢来就可以。',
+    'rain'
+);
+
+INSERT INTO night_sessions (
+    id, user_id, date, phase, box_closed, conversation_turns, selected_guidance,
+    latest_ai_draft, created_at, updated_at
+)
+SELECT
+    session_id, :'user_id', seed_date, 'SLEEPING', TRUE, 1, guidance,
+    '{}'::jsonb, now(), now()
+FROM reset_seed_sessions
+ON CONFLICT (user_id, date) DO UPDATE SET
+    phase = EXCLUDED.phase,
+    box_closed = EXCLUDED.box_closed,
+    conversation_turns = EXCLUDED.conversation_turns,
+    selected_guidance = EXCLUDED.selected_guidance,
+    updated_at = now();
+
+INSERT INTO conversation_runs (
+    id, user_id, device_id, night_session_id, date, status, completed_turns,
+    guidance, guidance_status, started_at, finished_at, created_at, updated_at
+)
+SELECT
+    seed.run_id, :'user_id', '', session.id, seed.seed_date,
+    'completed', 1, seed.guidance, 'completed', now(), now(), now(), now()
+FROM reset_seed_sessions seed
+JOIN night_sessions session ON session.user_id = :'user_id' AND session.date = seed.seed_date
+ON CONFLICT (id) DO UPDATE SET
+    night_session_id = EXCLUDED.night_session_id,
+    status = EXCLUDED.status,
+    guidance = EXCLUDED.guidance,
+    guidance_status = EXCLUDED.guidance_status,
+    updated_at = now();
+
+INSERT INTO memory_cards (
+    id, session_id, run_id, user_id, date, emotion, worry, tomorrow_task,
+    comfort, suggested_guidance, fallback, created_at, updated_at
+)
+SELECT
+    md5(:'user_id' || ':reset-seed:' || seed.seed_key || ':card')::uuid,
+    run.night_session_id, seed.run_id, :'user_id', seed.seed_date, seed.emotion,
+    seed.worry, seed.tomorrow_task, seed.comfort, seed.guidance, FALSE, now(), now()
+FROM reset_seed_sessions seed
+JOIN conversation_runs run ON run.id = seed.run_id
+ON CONFLICT (run_id) DO UPDATE SET
+    emotion = EXCLUDED.emotion,
+    worry = EXCLUDED.worry,
+    tomorrow_task = EXCLUDED.tomorrow_task,
+    comfort = EXCLUDED.comfort,
+    suggested_guidance = EXCLUDED.suggested_guidance,
+    updated_at = now();
 COMMIT;
 SQL
 printf '%s\n' 'reset completed; profile, device, historical dates, acknowledged commands, and device event audit were preserved'

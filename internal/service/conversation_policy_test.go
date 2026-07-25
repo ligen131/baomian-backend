@@ -4,8 +4,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baomian/baomian-backend/internal/ai"
 	"github.com/baomian/baomian-backend/internal/dto"
 	"github.com/baomian/baomian-backend/internal/model"
+	"github.com/google/uuid"
 )
 
 func TestDemoContinuousConversationRequiresExactIdentity(t *testing.T) {
@@ -83,17 +85,24 @@ func TestResetDemoConversationPreservesPhysicalAndReminderState(t *testing.T) {
 	}
 }
 
-func TestConversationFinalizePolicyRequiresThreeOrdinaryTurns(t *testing.T) {
-	for turn := 1; turn <= 2; turn++ {
+func TestContinuousRunNeverExpiresAtLegacyHardDeadline(t *testing.T) {
+	now := time.Date(2026, 7, 25, 1, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Second)
+	session := &model.NightSession{ConversationHardDeadlineAt: &past}
+	if conversationExpired(session, true, now) {
+		t.Fatal("continuous run expired at legacy hard deadline")
+	}
+	if !conversationExpired(session, false, now) {
+		t.Fatal("legacy HTTP conversation did not retain hard deadline")
+	}
+}
+
+func TestConversationFinalizePolicyNeverFinalizesOrdinaryTurns(t *testing.T) {
+	for _, turn := range []int{1, 2, 3, 4, 10} {
 		finalize, reason := conversationFinalizePolicy(turn, dto.AIResult{ShouldFinalize: true})
 		if finalize || reason != "" {
 			t.Fatalf("turn %d finalize=%v reason=%q, want false and empty", turn, finalize, reason)
 		}
-	}
-
-	finalize, reason := conversationFinalizePolicy(3, dto.AIResult{})
-	if !finalize || reason != "turn_limit" {
-		t.Fatalf("third turn finalize=%v reason=%q", finalize, reason)
 	}
 }
 
@@ -104,14 +113,76 @@ func TestConversationFinalizePolicyDoesNotAdvanceHighRiskBeforeThirdTurn(t *test
 	}
 }
 
-func TestFinalizeRequiresThreeCompletedTurns(t *testing.T) {
-	for turns := 0; turns < 3; turns++ {
-		if err := validateConversationFinalization(&model.NightSession{Phase: "CONVERSATION", ConversationTurns: turns}); err == nil {
-			t.Fatalf("turns=%d finalization unexpectedly allowed", turns)
+func TestManualFinalizeAllowsAnyCompletedTurnCount(t *testing.T) {
+	for _, turns := range []int{0, 1, 3, 10} {
+		if err := validateConversationFinalization(&model.NightSession{Phase: "CONVERSATION", ConversationTurns: turns}); err != nil {
+			t.Fatalf("turns=%d finalization rejected: %v", turns, err)
 		}
 	}
-	if err := validateConversationFinalization(&model.NightSession{Phase: "CONVERSATION", ConversationTurns: 3}); err != nil {
-		t.Fatalf("three completed turns rejected: %v", err)
+}
+
+func TestRecoveryDistinguishesPendingAIFromPersistedReply(t *testing.T) {
+	turnID := "turn-5"
+	run := &model.ConversationRun{Status: model.ConversationRunActive, CompletedTurns: 4, ProcessingTurnID: &turnID}
+	pending := recoveryState(run, []model.ConversationTurn{{Role: "user", TurnIndex: 5, ClientRequestID: &turnID}})
+	if pending.ResumeAction != "wait_turn" {
+		t.Fatalf("pending recovery = %#v", pending)
+	}
+	persisted := recoveryState(run, []model.ConversationTurn{{Role: "assistant", TurnIndex: 5, ClientRequestID: &turnID}})
+	if persisted.ResumeAction != "replay_reply" {
+		t.Fatalf("persisted recovery = %#v", persisted)
+	}
+}
+
+func TestJournalRequestIncludesEveryCompleteTurnInRun(t *testing.T) {
+	turns := []model.ConversationTurn{
+		{Role: "user", Text: "第一件心事", TurnIndex: 1},
+		{Role: "assistant", Text: "第一轮陪伴", TurnIndex: 1},
+		{Role: "user", Text: "第二件心事", TurnIndex: 2},
+		{Role: "assistant", Text: "第二轮陪伴", TurnIndex: 2},
+		{Role: "user", Text: "未完成半轮", TurnIndex: 3},
+	}
+	request := journalRequest(turns)
+	if request.Mode != ai.ModeJournal || len(request.Turns) != 4 {
+		t.Fatalf("request = %#v", request)
+	}
+	if request.Turns[0].Text != "第一件心事" || request.Turns[3].Text != "第二轮陪伴" {
+		t.Fatalf("turns = %#v", request.Turns)
+	}
+	if request.Text != "第一件心事\n第二件心事" {
+		t.Fatalf("text = %q", request.Text)
+	}
+}
+
+func TestSleepGuidanceMapsUnsupportedOptionsToRain(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: "rain", want: "rain"},
+		{input: "breathing_46", want: "breathing_46"},
+		{input: "brown_noise", want: "rain"},
+		{input: "silence", want: "rain"},
+	} {
+		if got := sleepGuidance(test.input); got != test.want {
+			t.Fatalf("sleepGuidance(%q) = %q, want %q", test.input, got, test.want)
+		}
+	}
+}
+
+func TestMemoryCardDTOCarriesRunIdentity(t *testing.T) {
+	runID := uuid.New()
+	value := dto.MemoryCardFromModel(&model.MemoryCard{RunID: runID})
+	if value.RunID != runID {
+		t.Fatalf("runId = %s, want %s", value.RunID, runID)
+	}
+}
+
+func TestConversationTurnDTOCarriesRunIdentity(t *testing.T) {
+	runID := uuid.New()
+	value := dto.ConversationTurnFromModel(&model.ConversationTurn{RunID: runID})
+	if value.RunID != runID {
+		t.Fatalf("runId = %s, want %s", value.RunID, runID)
 	}
 }
 

@@ -112,12 +112,127 @@ func (s *Store) UpdateNightSession(ctx context.Context, session *model.NightSess
 	return nil
 }
 
+func (s *Store) CreateConversationRun(ctx context.Context, run *model.ConversationRun) error {
+	if run.ID == uuid.Nil {
+		run.ID = uuid.New()
+	}
+	if run.Status == "" {
+		run.Status = model.ConversationRunActive
+	}
+	if run.GuidanceStatus == "" {
+		run.GuidanceStatus = model.GuidancePending
+	}
+	if run.StartedAt.IsZero() {
+		run.StartedAt = time.Now().UTC()
+	}
+	if err := s.db.WithContext(ctx).Create(run).Error; err != nil {
+		return fmt.Errorf("create conversation run: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetConversationRun(ctx context.Context, userID string, runID uuid.UUID, forUpdate bool) (*model.ConversationRun, error) {
+	query := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", runID, userID)
+	if forUpdate {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var run model.ConversationRun
+	if err := query.First(&run).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, repository.ErrNotFound
+		}
+		return nil, fmt.Errorf("get conversation run: %w", err)
+	}
+	return &run, nil
+}
+
+func (s *Store) GetActiveConversationRun(ctx context.Context, userID, deviceID string, forUpdate bool) (*model.ConversationRun, error) {
+	query := s.db.WithContext(ctx).
+		Where("user_id = ? AND device_id = ? AND status IN ?", userID, deviceID, []string{model.ConversationRunActive, model.ConversationRunFinishing}).
+		Order("created_at DESC")
+	if forUpdate {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var run model.ConversationRun
+	if err := query.First(&run).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, repository.ErrNotFound
+		}
+		return nil, fmt.Errorf("get active conversation run: %w", err)
+	}
+	return &run, nil
+}
+
+func (s *Store) GetLatestConversationRun(ctx context.Context, userID, deviceID string) (*model.ConversationRun, error) {
+	var run model.ConversationRun
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ? AND device_id = ?", userID, deviceID).
+		Order("created_at DESC").First(&run).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, repository.ErrNotFound
+		}
+		return nil, fmt.Errorf("get latest conversation run: %w", err)
+	}
+	return &run, nil
+}
+
+func (s *Store) UpdateConversationRun(ctx context.Context, run *model.ConversationRun) error {
+	if err := s.db.WithContext(ctx).Save(run).Error; err != nil {
+		return fmt.Errorf("update conversation run: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) CreateConversationTurn(ctx context.Context, turn *model.ConversationTurn) error {
 	if turn.ID == uuid.Nil {
 		turn.ID = uuid.New()
 	}
 	if err := s.db.WithContext(ctx).Create(turn).Error; err != nil {
 		return fmt.Errorf("create conversation turn: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListConversationTurnsByRun(ctx context.Context, runID uuid.UUID) ([]model.ConversationTurn, error) {
+	var turns []model.ConversationTurn
+	if err := s.db.WithContext(ctx).Where("run_id = ?", runID).Order("created_at ASC").Find(&turns).Error; err != nil {
+		return nil, fmt.Errorf("list conversation turns by run: %w", err)
+	}
+	return turns, nil
+}
+
+func (s *Store) GetConversationTurnByRunRequestID(ctx context.Context, runID uuid.UUID, clientRequestID, role string) (*model.ConversationTurn, error) {
+	var turn model.ConversationTurn
+	err := s.db.WithContext(ctx).Where("run_id = ? AND client_request_id = ? AND role = ?", runID, clientRequestID, role).First(&turn).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, repository.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get conversation turn by run request id: %w", err)
+	}
+	return &turn, nil
+}
+
+func (s *Store) DeleteConversationTurnsByRun(ctx context.Context, runID uuid.UUID) error {
+	if err := s.db.WithContext(ctx).Where("run_id = ?", runID).Delete(&model.ConversationTurn{}).Error; err != nil {
+		return fmt.Errorf("delete conversation turns by run: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteIncompleteConversationTurnsByRun(ctx context.Context, runID uuid.UUID) error {
+	query := `
+		DELETE FROM conversation_turns AS user_turn
+		WHERE user_turn.run_id = ?
+		  AND user_turn.role = 'user'
+		  AND NOT EXISTS (
+			SELECT 1 FROM conversation_turns AS assistant_turn
+			WHERE assistant_turn.run_id = user_turn.run_id
+			  AND assistant_turn.turn_index = user_turn.turn_index
+			  AND assistant_turn.role = 'assistant'
+		  )`
+	if err := s.db.WithContext(ctx).Exec(query, runID).Error; err != nil {
+		return fmt.Errorf("delete incomplete conversation turns by run: %w", err)
 	}
 	return nil
 }
@@ -174,6 +289,27 @@ func (s *Store) GetMemoryCardBySession(ctx context.Context, sessionID uuid.UUID)
 func (s *Store) DeleteMemoryCardBySession(ctx context.Context, sessionID uuid.UUID) error {
 	if err := s.db.WithContext(ctx).Where("session_id = ?", sessionID).Delete(&model.MemoryCard{}).Error; err != nil {
 		return fmt.Errorf("delete memory card by session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetMemoryCardByRun(ctx context.Context, runID uuid.UUID) (*model.MemoryCard, error) {
+	var card model.MemoryCard
+	if err := s.db.WithContext(ctx).Where("run_id = ?", runID).First(&card).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, repository.ErrNotFound
+		}
+		return nil, fmt.Errorf("get memory card by run: %w", err)
+	}
+	return &card, nil
+}
+
+func (s *Store) CreateMemoryCard(ctx context.Context, card *model.MemoryCard) error {
+	if card.ID == uuid.Nil {
+		card.ID = uuid.New()
+	}
+	if err := s.db.WithContext(ctx).Create(card).Error; err != nil {
+		return fmt.Errorf("create memory card: %w", err)
 	}
 	return nil
 }

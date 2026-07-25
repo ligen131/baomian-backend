@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/baomian/baomian-backend/internal/model"
+	"github.com/baomian/baomian-backend/internal/voice"
 	"github.com/google/uuid"
 )
 
@@ -72,9 +73,10 @@ type TonightActionRequest struct {
 }
 
 type ConversationTurnRequest struct {
-	Text            string `json:"text" binding:"required"`
-	InputMode       string `json:"inputMode"`
-	ClientRequestID string `json:"clientRequestId,omitempty"`
+	RunID           uuid.UUID `json:"runId,omitempty"`
+	Text            string    `json:"text" binding:"required"`
+	InputMode       string    `json:"inputMode"`
+	ClientRequestID string    `json:"clientRequestId,omitempty"`
 }
 
 type ConversationActivityRequest struct {
@@ -83,6 +85,7 @@ type ConversationActivityRequest struct {
 
 type ConversationTurn struct {
 	ID              uuid.UUID `json:"id"`
+	RunID           uuid.UUID `json:"runId"`
 	Role            string    `json:"role"`
 	Text            string    `json:"text"`
 	TurnIndex       int       `json:"turnIndex"`
@@ -93,10 +96,12 @@ type ConversationTurn struct {
 }
 
 type ConversationHistoryResponse struct {
-	Turns          []ConversationTurn `json:"turns"`
-	Tonight        TonightState       `json:"tonight"`
-	RemainingTurns int                `json:"remainingTurns"`
-	Processing     bool               `json:"processing"`
+	RunID          uuid.UUID           `json:"currentRunId,omitempty"`
+	Recovery       voice.RecoveryState `json:"recovery,omitempty"`
+	Turns          []ConversationTurn  `json:"turns"`
+	Tonight        TonightState        `json:"tonight"`
+	RemainingTurns int                 `json:"remainingTurns"`
+	Processing     bool                `json:"processing"`
 }
 
 type AIResult struct {
@@ -125,6 +130,7 @@ type FinalizeResponse struct {
 
 type MemoryCard struct {
 	ID                      uuid.UUID  `json:"id"`
+	RunID                   uuid.UUID  `json:"runId"`
 	Date                    string     `json:"date"`
 	Emotion                 string     `json:"emotion"`
 	Worry                   string     `json:"worry"`
@@ -152,6 +158,7 @@ type DeviceEventRequest struct {
 
 type DeviceEventResponse struct {
 	Duplicate bool         `json:"duplicate"`
+	RunID     uuid.UUID    `json:"runId,omitempty"`
 	Tonight   TonightState `json:"tonight"`
 	Commands  []Command    `json:"commands"`
 }
@@ -235,7 +242,7 @@ func TonightFromModels(session *model.NightSession, profile *model.Profile) Toni
 
 func MemoryCardFromModel(value *model.MemoryCard) MemoryCard {
 	return MemoryCard{
-		ID: value.ID, Date: value.Date.Format("2006-01-02"), Emotion: value.Emotion,
+		ID: value.ID, RunID: value.RunID, Date: value.Date.Format("2006-01-02"), Emotion: value.Emotion,
 		Worry: value.Worry, TomorrowTask: value.TomorrowTask, Comfort: value.Comfort,
 		SuggestedGuidance: value.SuggestedGuidance, Fallback: value.Fallback,
 		TomorrowTaskCompleted:   value.TomorrowTaskCompleted,
@@ -257,7 +264,7 @@ func ConversationTurnFromModel(value *model.ConversationTurn) ConversationTurn {
 		clientRequestID = *value.ClientRequestID
 	}
 	return ConversationTurn{
-		ID: value.ID, Role: value.Role, Text: value.Text, TurnIndex: value.TurnIndex,
+		ID: value.ID, RunID: value.RunID, Role: value.Role, Text: value.Text, TurnIndex: value.TurnIndex,
 		Fallback: value.Fallback, InputMode: value.InputMode, ClientRequestID: clientRequestID,
 		CreatedAt: value.CreatedAt,
 	}

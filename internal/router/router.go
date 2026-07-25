@@ -22,6 +22,7 @@ type Dependencies struct {
 	JournalController      *controller.JournalController
 	DeviceController       *controller.DeviceController
 	DeviceVoiceController  *controller.DeviceVoiceController
+	TTSController          *controller.TTSController
 	WebSocketController    *controller.WebSocketController
 	Metrics                *metrics.Registry
 	Logger                 interface {
@@ -65,6 +66,7 @@ func New(deps Dependencies, accessLog gin.HandlerFunc) *gin.Engine {
 		api.GET("/memories", deps.JournalController.List)
 		api.GET("/ws", deps.WebSocketController.Connect)
 		api.GET("/device/voice", deps.DeviceVoiceController.Connect)
+		api.POST("/tts/stream", deps.TTSController.Stream)
 		api.POST("/device/events", deps.DeviceController.Event)
 		api.POST("/device/heartbeat", deps.DeviceController.Heartbeat)
 		api.GET("/devices/:deviceId/status", deps.DeviceController.Status)

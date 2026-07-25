@@ -56,7 +56,7 @@ func (a *AnthropicAdapter) Generate(ctx context.Context, request Request) (dto.A
 			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
 		},
 		System: []anthropic.TextBlockParam{{
-			Text: systemPrompt,
+			Text: systemPromptFor(request.Mode),
 		}},
 		OutputConfig: anthropic.OutputConfigParam{
 			Effort: anthropic.OutputConfigEffortLow,
@@ -65,7 +65,7 @@ func (a *AnthropicAdapter) Generate(ctx context.Context, request Request) (dto.A
 			},
 		},
 		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock("请根据以下结构化输入生成本轮回复：\n" + string(input))),
+			anthropic.NewUserMessage(anthropic.NewTextBlock(userInstructionFor(request.Mode) + string(input))),
 		},
 	})
 	if err != nil {
@@ -96,9 +96,6 @@ func parseResult(content string, turnIndex int) (dto.AIResult, error) {
 	}
 	if err := validateResult(result); err != nil {
 		return dto.AIResult{}, err
-	}
-	if turnIndex >= 3 {
-		result.ShouldFinalize = true
 	}
 	result.Fallback = false
 	result.HighRisk = false

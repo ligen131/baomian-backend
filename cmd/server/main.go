@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/baomian/baomian-backend/internal/ai"
+	"github.com/baomian/baomian-backend/internal/audio"
 	"github.com/baomian/baomian-backend/internal/config"
 	"github.com/baomian/baomian-backend/internal/controller"
 	"github.com/baomian/baomian-backend/internal/coordinator"
@@ -66,6 +67,9 @@ func main() {
 		store, hub, cfg.DemoUserID, cfg.DeviceCommandLease, cfg.DeviceCommandMaxAttempts,
 		cfg.ConversationSilenceTimeout, cfg.ConversationMaxDuration, cfg.PhoneRemovedResumeWindow, logger,
 	)
+	deviceService.ConfigureDemoContinuousConversation(
+		cfg.DemoContinuousConversation, cfg.DemoUserID, cfg.DefaultDeviceID,
+	)
 	speechConfig := speech.Config{
 		AppID: cfg.VolcengineSpeechAppID, AccessToken: cfg.VolcengineSpeechAccessToken,
 		TTSAPIKey: cfg.VolcengineTTSAPIKey,
@@ -81,6 +85,10 @@ func main() {
 		conversationService, tonightService, asrClient, ttsClient,
 		cfg.VoiceOpeningText, cfg.VoiceBreathingScript, cfg.VoiceMaxUtteranceDuration, logger,
 	)
+	voiceSessionService.ConfigureSleepAudio(audio.NewSleepService(
+		cfg.DemoRainAudioPath,
+		cfg.DemoBreathingAudioPath,
+	))
 
 	profileController := controller.NewProfileController(profileService)
 	tonightController := controller.NewTonightController(tonightService)
@@ -88,6 +96,7 @@ func main() {
 	conversationController := controller.NewConversationController(conversationService)
 	deviceController := controller.NewDeviceController(deviceService, cfg.DeviceLongPollTimeout)
 	deviceVoiceController := controller.NewDeviceVoiceController(voiceSessionService, cfg.VolcengineSpeechConfigured(), cfg.DemoUserID, logger)
+	ttsController := controller.NewTTSController(ttsClient, cfg.VolcengineTTSConfigured())
 	webSocketController := controller.NewWebSocketController(hub, registry, cfg.DemoUserID)
 
 	coordinatorContext, stopCoordinator := context.WithCancel(context.Background())
@@ -100,7 +109,7 @@ func main() {
 		ProfileController: profileController, TonightController: tonightController,
 		ConversationController: conversationController, JournalController: journalController,
 		DeviceController: deviceController, DeviceVoiceController: deviceVoiceController,
-		WebSocketController: webSocketController, Metrics: registry,
+		TTSController: ttsController, WebSocketController: webSocketController, Metrics: registry,
 	}, middleware.AccessLog(logger))
 
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: engine, ReadHeaderTimeout: 5 * time.Second}

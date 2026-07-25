@@ -1,10 +1,11 @@
 openapi: 3.1.0
 info:
   title: 抱眠 MVP Backend API
-  version: 0.2.0
+  version: 0.3.0
   description: |
-    抱眠 P0+P1 Android、AI 与 T5 设备网关契约。当前使用 Demo User 身份。
-    T5 通过独立 WebSocket 流式传输 PCM；后端桥接火山引擎 ASR/TTS，并继续使用现有 Claude 三轮服务。
+    抱眠连续语音演示、前端流式 TTS、Android 状态与 T5 设备网关目标契约。当前使用 Demo User 身份。
+    RESET 开始一场 run；T5 自动录音并经本地 VAD 结束每轮；后端桥接火山引擎 ASR/TTS 和 Claude，支持不限轮连续对话。
+    KEY 通过 Voice WebSocket 的 conversation.finish 结束 run，后端 append 晚安日记并播放睡眠引导。
     Android 只负责设置、状态、设备在线和晚安日记，不参与正式语音链路。
 servers:
   - url: https://bm.lg.gl/api/v1
@@ -18,6 +19,7 @@ tags:
   - {name: Profile}
   - {name: Tonight}
   - {name: Conversation}
+  - {name: Speech}
   - {name: Journal}
   - {name: Device}
   - {name: Realtime}
@@ -98,15 +100,45 @@ paths:
   /conversations/finalize:
     post:
       tags: [Conversation]
-      summary: Debug 收尾并生成或更新晚安卡；仅允许已完成 3 轮的会话
+      summary: Debug 收尾当前 run；正式 T5 使用 conversation.finish
+      description: 幂等总结当前 run 已完成的全部轮次并 append 一篇晚安日记；不要求三轮，也不覆盖同日历史日记。
       responses:
-        "200": {description: 晚安卡与今晚状态, content: {application/json: {schema: {$ref: "#/components/schemas/FinalizeResponse"}}}}
+        "200": {description: 新追加的晚安日记与今晚状态, content: {application/json: {schema: {$ref: "#/components/schemas/FinalizeResponse"}}}}
         "409": {$ref: "#/components/responses/Error"}
         default: {$ref: "#/components/responses/Error"}
+  /tts/stream:
+    post:
+      tags: [Speech]
+      summary: 将前端提交的文本实时合成为 PCM 音频流
+      description: |
+        该接口无 Tonight、ConversationTurn 或 Journal 副作用。服务端在火山引擎返回首个 PCM chunk 后立即 flush。
+        成功 body 是连续的 PCM signed 16-bit little-endian、24000 Hz、mono；HTTP 网络 chunk 不保证按 960 bytes 对齐。
+        响应已经开始后若上游失败，服务端直接终止音频流，不在 PCM body 中混入 JSON。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TTSStreamRequest"}
+      responses:
+        "200":
+          description: Streaming raw PCM response
+          headers:
+            Cache-Control: {schema: {type: string, const: no-store}}
+            X-Audio-Codec: {schema: {type: string, const: pcm_s16le}}
+            X-Audio-Sample-Rate: {schema: {type: integer, const: 24000}}
+            X-Audio-Bit-Depth: {schema: {type: integer, const: 16}}
+            X-Audio-Channels: {schema: {type: integer, const: 1}}
+          content:
+            audio/pcm;codec=pcm_s16le;rate=24000;channels=1:
+              schema: {type: string, format: binary}
+        "400": {$ref: "#/components/responses/Error"}
+        "502": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
   /journals:
     get:
       tags: [Journal]
-      summary: 获取最近晚安卡
+      summary: 获取最近晚安日记（同一天可返回多篇）
+      description: 按 date DESC、createdAt DESC 排序；KEY 每完成一个 run 就 append 新记录，不覆盖同日历史记录。不提供 /journals/tonight。
       parameters: [{$ref: "#/components/parameters/Limit"}]
       responses:
         "200":
@@ -164,12 +196,28 @@ paths:
       description: |
         Control frames are UTF-8 JSON text messages. Audio frames are raw PCM signed 16-bit
         little-endian, 24000 Hz, mono, 20 ms, exactly 960 bytes per WebSocket binary message.
-        Uplink controls: session.start, input.start, input.end, playback.stop.
+        Uplink controls: session.start, input.start, input.end, playback.stop, conversation.finish.
         Downlink controls: session.ready, input.accepted, transcript.final, thinking,
-        playback.start, playback.end, conversation.completed, guidance.start, playback.stop, error.
-        The full ordered event protocol, push-to-talk behavior, interruption and reconnect rules are
-        defined in docs/hardware-integration.md and docs/voice-streaming-design.md.
+        playback.start, playback.end, conversation.completed, playback.stop, error.
+        After opening/reply playback.end(completed), T5 automatically records and uses local VAD to send input.end.
+        There is no three-turn limit. Holding KEY sends conversation.finish; the server appends one journal and streams guidance audio.
+        The full ordered protocol, interruption and reconnect rules are defined in docs/hardware-integration.md and docs/voice-streaming-design.md.
         Returns HTTP 503 before upgrade when the Volcengine ASR App ID, ASR Access Token, or TTS API Key is missing.
+      x-websocket:
+        schema: ./device-voice.schema.json
+        textMessages:
+          description: Client and server JSON control events validate against the authoritative JSON Schema 2020-12 contract.
+        binaryMessages:
+          description: Raw PCM signed 16-bit little-endian audio; one WebSocket binary message is one frame.
+          codec: pcm_s16le
+          sampleRate: 24000
+          channels: 1
+          frameMs: 20
+          frameBytes: 960
+        playbackTerminalEvents: [playback.end, error, websocket.close]
+        closeCodes:
+          "1008": Stop the automatic conversation loop.
+          "1011": Back off and reconnect.
       parameters:
         - {name: deviceId, in: query, required: true, schema: {type: string}}
         - {name: userId, in: query, required: false, schema: {type: string, default: expo-user-001}}
@@ -182,7 +230,7 @@ paths:
       tags: [Device]
       security: []
       summary: 上报 T5 设备事件并刷新 lastSeenAt
-      description: eventId 全局幂等；重复上报返回首次结果并标记 duplicate=true。若设备已处于闭仓状态，使用新 eventId 重复上报 box_closed 也返回当前状态且 commands 为空，不重复播放确认音；真正的状态冲突仍返回 409。
+      description: eventId 全局幂等；重复上报返回首次结果并标记 duplicate=true。连续演示身份使用新的 box_closed eventId 且 payload.source=reset_button 时创建新的 run，但不得删除旧对话或晚安日记。普通生产仓盖仍按状态幂等处理。
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: "#/components/schemas/DeviceEventRequest"}}}
@@ -295,12 +343,12 @@ components:
         bedtime: {type: string}
         wakeTime: {type: string}
         whiteNoiseDurationMin: {type: integer, enum: [10, 20, 30]}
-        conversationTurns: {type: integer, minimum: 0, maximum: 3}
+        conversationTurns: {type: integer, minimum: 0, description: 当前 run 已完成的用户/AI 往返次数，无三轮上限}
         selectedGuidance: {$ref: "#/components/schemas/Guidance"}
         audioPlaying: {type: boolean}
         pausedForTonight: {type: boolean}
         remindersSkipped: {type: boolean}
-        finalizeReason: {type: string, enum: [manual, turn_limit, silence, max_duration]} # manual 仅可用于已完成 3 轮的 Debug 收尾
+        finalizeReason: {type: string, enum: [manual, key_finish, reset_replaced, connection_aborted]}
         conversationStartedAt: {type: string, format: date-time}
         conversationSilenceDeadlineAt: {type: string, format: date-time}
         conversationHardDeadlineAt: {type: string, format: date-time}
@@ -322,19 +370,32 @@ components:
       type: object
       properties:
         activity: {type: string, enum: [typing, speaking, listening]}
+    TTSStreamRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: trim 后必须非空；最多 500 个 Unicode 字符
+          example: 今晚辛苦了，先慢慢放松下来吧。
     ConversationTurnRequest:
       type: object
       additionalProperties: false
       required: [text]
       properties:
+        runId: {type: string, format: uuid, description: 当前 conversation run；Voice 必填，HTTP 兼容调用可由服务端解析当前 run}
         text: {type: string}
         inputMode: {type: string, enum: [text, voice], default: text}
         clientRequestId: {type: string, maxLength: 128}
     ConversationTurn:
       type: object
-      required: [id, role, text, turnIndex, fallback, inputMode, createdAt]
+      required: [id, runId, role, text, turnIndex, fallback, inputMode, createdAt]
       properties:
         id: {type: string, format: uuid}
+        runId: {type: string, format: uuid}
         role: {type: string, enum: [user, assistant]}
         text: {type: string}
         turnIndex: {type: integer}
@@ -346,9 +407,11 @@ components:
       type: object
       required: [turns, tonight, remainingTurns, processing]
       properties:
+        currentRunId: {type: string, format: uuid}
+        recovery: {type: object, description: 与 device-voice.schema.json 的 recovery 定义一致}
         turns: {type: array, items: {$ref: "#/components/schemas/ConversationTurn"}}
         tonight: {$ref: "#/components/schemas/TonightState"}
-        remainingTurns: {type: integer, minimum: 0, maximum: 3}
+        remainingTurns: {type: integer, deprecated: true, description: 连续演示不限制轮数；兼容字段固定返回 0}
         processing: {type: boolean}
     AIResult:
       type: object
@@ -379,9 +442,10 @@ components:
         tonight: {$ref: "#/components/schemas/TonightState"}
     MemoryCard:
       type: object
-      required: [id, date, emotion, worry, tomorrowTask, comfort, suggestedGuidance, fallback, tomorrowTaskCompleted, createdAt]
+      required: [id, runId, date, emotion, worry, tomorrowTask, comfort, suggestedGuidance, fallback, tomorrowTaskCompleted, createdAt]
       properties:
         id: {type: string, format: uuid}
+        runId: {type: string, format: uuid}
         date: {type: string, format: date}
         emotion: {type: string}
         worry: {type: string}
@@ -405,13 +469,18 @@ components:
         deviceId: {type: string}
         userId: {type: string, default: expo-user-001}
         type: {type: string, enum: [box_closed, box_opened, soft_button/short_press, soft_button/long_press, alarm_start]}
-        payload: {type: object, additionalProperties: true}
+        payload:
+          type: object
+          additionalProperties: true
+          properties:
+            source: {type: string, enum: [reset_button, box_sensor], description: box_closed 的物理来源}
         occurredAt: {type: string, format: date-time}
     DeviceEventResponse:
       type: object
       required: [duplicate, tonight, commands]
       properties:
         duplicate: {type: boolean}
+        runId: {type: string, format: uuid, description: RESET 连续演示成功时返回；相同 eventId 重试保持不变}
         tonight: {$ref: "#/components/schemas/TonightState"}
         commands: {type: array, items: {$ref: "#/components/schemas/Command"}}
     DeviceHeartbeatRequest:
@@ -471,6 +540,6 @@ components:
           type: object
           required: [code, message]
           properties:
-            code: {type: string, enum: [validation_error, invalid_transition, conversation_limit, conversation_expired, request_in_progress, journal_not_deletable, not_found, ai_error, storage_error, internal_error, speech_not_configured, invalid_phase, invalid_event, invalid_audio_frame, turn_in_progress, turn_too_long, asr_unavailable, empty_transcript, ai_unavailable, tts_unavailable, device_too_slow]}
+            code: {type: string, enum: [validation_error, invalid_transition, request_in_progress, finish_in_progress, journal_unavailable, journal_not_deletable, not_found, ai_error, storage_error, internal_error, speech_not_configured, invalid_phase, invalid_event, invalid_audio_frame, turn_in_progress, turn_too_long, asr_unavailable, empty_transcript, ai_unavailable, tts_unavailable, device_too_slow]}
             message: {type: string}
             details: {type: object, additionalProperties: true}

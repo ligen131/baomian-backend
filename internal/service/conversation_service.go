@@ -14,6 +14,7 @@ import (
 	"github.com/baomian/baomian-backend/internal/realtime"
 	"github.com/baomian/baomian-backend/internal/repository"
 	"github.com/baomian/baomian-backend/internal/state"
+	"github.com/baomian/baomian-backend/internal/voice"
 	"github.com/google/uuid"
 )
 
@@ -65,85 +66,21 @@ func demoConversationRestartPolicy(session *model.NightSession, now time.Time) (
 	if !session.BoxClosed {
 		return "", false
 	}
-	if session.Phase == string(state.Conversation) && session.ConversationTurns < 3 &&
+	if session.Phase == string(state.Conversation) &&
 		session.ConversationHardDeadlineAt != nil && !now.Before(*session.ConversationHardDeadlineAt) {
 		if session.ConversationProcessingUntil != nil && now.Before(*session.ConversationProcessingUntil) {
 			return "", true
 		}
 		return "expired", false
 	}
-	if (session.Phase == string(state.ChoosingGuidance) || session.Phase == string(state.Sleeping)) && session.ConversationTurns == 3 {
+	if session.Phase == string(state.ChoosingGuidance) || session.Phase == string(state.Sleeping) {
 		return "completed", false
 	}
 	return "", false
 }
 
-func (s *ConversationService) PrepareVoiceSession(ctx context.Context, userID, deviceID string) error {
-	if !demoContinuousConversationEnabled(s.demoContinuousConversation, s.demoUserID, s.demoDeviceID, userID, deviceID) {
-		return nil
-	}
-
-	var response dto.TonightState
-	var sessionID, deletedCardID uuid.UUID
-	var restarted bool
-	var reason, previousPhase string
-	var previousTurns int
-	err := s.store.WithTx(ctx, func(tx repository.Store) error {
-		profile, err := tx.GetOrCreateProfile(ctx, userID)
-		if err != nil {
-			return err
-		}
-		now := s.now().UTC()
-		session, err := tx.GetOrCreateTonight(ctx, userID, profileDate(now, profile.TimeZone), true)
-		if err != nil {
-			return err
-		}
-		var blocked bool
-		reason, blocked = demoConversationRestartPolicy(session, now)
-		if blocked {
-			return NewError("request_in_progress", "上一轮倾诉正在处理中", nil)
-		}
-		if reason == "" {
-			return nil
-		}
-		sessionID = session.ID
-		previousPhase = session.Phase
-		previousTurns = session.ConversationTurns
-		if err := tx.DeleteConversationTurns(ctx, session.ID); err != nil {
-			return err
-		}
-		if card, err := tx.GetMemoryCardBySession(ctx, session.ID); err == nil {
-			deletedCardID = card.ID
-		} else if !errors.Is(err, repository.ErrNotFound) {
-			return err
-		}
-		if err := tx.DeleteMemoryCardBySession(ctx, session.ID); err != nil {
-			return err
-		}
-		if err := tx.DeleteOpenDeviceCommands(ctx, userID, deviceID); err != nil {
-			return err
-		}
-		resetDemoConversation(session)
-		if err := tx.UpdateNightSession(ctx, session); err != nil {
-			return err
-		}
-		response = dto.TonightFromModels(session, profile)
-		restarted = true
-		return nil
-	})
-	if err != nil {
-		return normalizeServiceError(err, "准备演示语音会话失败")
-	}
-	if !restarted {
-		return nil
-	}
-	if s.logger != nil {
-		s.logger.InfoContext(ctx, "demo conversation restarted", "sessionId", sessionID, "userId", userID, "deviceId", deviceID, "restartReason", reason, "previousPhase", previousPhase, "previousCompletedTurns", previousTurns)
-	}
-	if deletedCardID != uuid.Nil {
-		publish(s.hub, userID, "journal.deleted", map[string]any{"id": deletedCardID})
-	}
-	publish(s.hub, userID, "tonight.updated", response)
+func (s *ConversationService) PrepareVoiceSession(_ context.Context, _, _ string) error {
+	// RESET 设备事件负责幂等创建 run；Voice 建连只恢复该 run，不能删除历史 turn 或日记。
 	return nil
 }
 
@@ -181,19 +118,77 @@ func (s *ConversationService) History(ctx context.Context, userID string) (dto.C
 		}
 		return dto.ConversationHistoryResponse{}, &Error{Code: "invalid_transition", Message: "今晚状态异常，请重新开始会话", Details: map[string]any{"phase": session.Phase, "completedTurns": session.ConversationTurns}, Cause: err}
 	}
-	turns, err := s.store.ListConversationTurns(ctx, session.ID)
+	var run *model.ConversationRun
+	if s.demoDeviceID != "" {
+		run, err = s.store.GetActiveConversationRun(ctx, userID, s.demoDeviceID, false)
+		if errors.Is(err, repository.ErrNotFound) {
+			run, err = s.store.GetLatestConversationRun(ctx, userID, s.demoDeviceID)
+		}
+		if err != nil && !errors.Is(err, repository.ErrNotFound) {
+			return dto.ConversationHistoryResponse{}, NewError("storage_error", "读取当前对话 run 失败", err)
+		}
+	}
+	var turns []model.ConversationTurn
+	if run != nil {
+		turns, err = s.store.ListConversationTurnsByRun(ctx, run.ID)
+	} else {
+		turns, err = s.store.ListConversationTurns(ctx, session.ID)
+	}
 	if err != nil {
 		return dto.ConversationHistoryResponse{}, NewError("storage_error", "读取对话历史失败", err)
 	}
 	result := dto.ConversationHistoryResponse{
 		Turns: make([]dto.ConversationTurn, 0, len(turns)), Tonight: dto.TonightFromModels(session, profile),
-		RemainingTurns: max(0, 3-session.ConversationTurns),
+		RemainingTurns: 0,
 		Processing:     session.ConversationProcessingUntil != nil && now.Before(*session.ConversationProcessingUntil),
+	}
+	if run != nil {
+		result.RunID = run.ID
+		result.Recovery = recoveryState(run, turns)
+		if run.Status == model.ConversationRunCompleted {
+			if card, cardErr := s.store.GetMemoryCardByRun(ctx, run.ID); cardErr == nil {
+				result.Recovery.JournalID = card.ID.String()
+			} else if !errors.Is(cardErr, repository.ErrNotFound) {
+				return dto.ConversationHistoryResponse{}, NewError("storage_error", "读取 run 日记失败", cardErr)
+			}
+		}
 	}
 	for i := range turns {
 		result.Turns = append(result.Turns, dto.ConversationTurnFromModel(&turns[i]))
 	}
 	return result, nil
+}
+
+func recoveryState(run *model.ConversationRun, turns []model.ConversationTurn) voice.RecoveryState {
+	state := voice.RecoveryState{RunStatus: run.Status, ResumeAction: "listen"}
+	if run.ProcessingTurnID != nil {
+		state.PendingTurnID = *run.ProcessingTurnID
+		state.ResumeAction = "wait_turn"
+		for _, turn := range turns {
+			if turn.Role == "assistant" && turn.ClientRequestID != nil && *turn.ClientRequestID == *run.ProcessingTurnID {
+				state.ResumeAction = "replay_reply"
+				break
+			}
+		}
+	}
+	if run.FinishEventID != nil {
+		state.FinishEventID = *run.FinishEventID
+	}
+	state.Guidance = run.Guidance
+	state.GuidanceStatus = run.GuidanceStatus
+	switch run.Status {
+	case model.ConversationRunFinishing:
+		state.ResumeAction = "wait_finish"
+	case model.ConversationRunCompleted:
+		if run.GuidanceStatus == model.GuidanceCompleted {
+			state.ResumeAction = "done"
+		} else {
+			state.ResumeAction = "replay_guidance"
+		}
+	case model.ConversationRunAborted:
+		state.ResumeAction = "done"
+	}
+	return state
 }
 
 func (s *ConversationService) BeginPlayback(ctx context.Context, userID string) error {
@@ -282,6 +277,7 @@ func (s *ConversationService) Activity(ctx context.Context, userID string, reque
 }
 
 func (s *ConversationService) Turn(ctx context.Context, userID string, request dto.ConversationTurnRequest) (dto.ConversationTurnResponse, error) {
+	continuousRun := request.RunID != uuid.Nil
 	request.Text = strings.TrimSpace(request.Text)
 	request.InputMode = strings.TrimSpace(request.InputMode)
 	request.ClientRequestID = strings.TrimSpace(request.ClientRequestID)
@@ -300,6 +296,7 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 
 	var profile *model.Profile
 	var sessionID uuid.UUID
+	var runID uuid.UUID
 	var turnIndex int
 	var duplicateResponse *dto.ConversationTurnResponse
 	err := s.store.WithTx(ctx, func(tx repository.Store) error {
@@ -314,8 +311,26 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 			return err
 		}
 		sessionID = session.ID
+		var run *model.ConversationRun
+		if request.RunID != uuid.Nil {
+			run, err = tx.GetConversationRun(ctx, userID, request.RunID, true)
+		} else if s.demoDeviceID != "" {
+			run, err = tx.GetActiveConversationRun(ctx, userID, s.demoDeviceID, true)
+		} else {
+			return NewError("validation_error", "runId 不能为空", nil)
+		}
+		if errors.Is(err, repository.ErrNotFound) {
+			return NewError("invalid_transition", "当前没有可用的 conversation run", nil)
+		}
+		if err != nil {
+			return err
+		}
+		if run.NightSessionID != session.ID || run.Status != model.ConversationRunActive {
+			return &Error{Code: "invalid_transition", Message: "conversation run 与今晚状态不匹配", Details: map[string]any{"runStatus": run.Status}}
+		}
+		runID = run.ID
 		if request.ClientRequestID != "" {
-			assistant, err := tx.GetConversationTurnByClientRequestID(ctx, session.ID, request.ClientRequestID, "assistant")
+			assistant, err := tx.GetConversationTurnByRunRequestID(ctx, run.ID, request.ClientRequestID, "assistant")
 			if err == nil {
 				result, parseErr := resultForDuplicate(assistant)
 				if parseErr != nil {
@@ -328,7 +343,7 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 			if !errors.Is(err, repository.ErrNotFound) {
 				return err
 			}
-			if existing, err := tx.GetConversationTurnByClientRequestID(ctx, session.ID, request.ClientRequestID, "user"); err == nil {
+			if existing, err := tx.GetConversationTurnByRunRequestID(ctx, run.ID, request.ClientRequestID, "user"); err == nil {
 				if session.ConversationProcessingUntil != nil && now.Before(*session.ConversationProcessingUntil) {
 					return NewError("request_in_progress", "该倾诉请求正在处理中", nil)
 				}
@@ -340,6 +355,10 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 				request.InputMode = existing.InputMode
 				leaseUntil := now.Add(s.processingLease)
 				session.ConversationProcessingUntil = &leaseUntil
+				run.ProcessingTurnID = &request.ClientRequestID
+				if err := tx.UpdateConversationRun(ctx, run); err != nil {
+					return err
+				}
 				return tx.UpdateNightSession(ctx, session)
 			} else if !errors.Is(err, repository.ErrNotFound) {
 				return err
@@ -360,13 +379,14 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 		if session.Phase != string(state.Conversation) {
 			return &Error{Code: "invalid_transition", Message: "当前不在倾诉阶段", Details: map[string]any{"phase": session.Phase}}
 		}
-		if session.ConversationHardDeadlineAt != nil && !now.Before(*session.ConversationHardDeadlineAt) {
+		if conversationExpired(session, continuousRun, now) {
 			return NewError("conversation_expired", "今晚的倾诉时间已结束", nil)
 		}
-		if session.ConversationTurns >= 3 {
-			return NewError("conversation_limit", "今晚的倾诉已达到 3 轮上限", nil)
+		if continuousRun {
+			session.ConversationSilenceDeadlineAt = nil
+			session.ConversationHardDeadlineAt = nil
 		}
-		turnIndex = nextTurnIndex(session.ConversationTurns)
+		turnIndex = nextTurnIndex(run.CompletedTurns)
 		leaseUntil := now.Add(s.processingLease)
 		session.ConversationProcessingUntil = &leaseUntil
 		session.ConversationLastActivityAt = &now
@@ -378,11 +398,15 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 		var clientRequestID *string
 		if request.ClientRequestID != "" {
 			clientRequestID = &request.ClientRequestID
+			run.ProcessingTurnID = clientRequestID
 		}
 		if err := tx.CreateConversationTurn(ctx, &model.ConversationTurn{
-			SessionID: session.ID, Role: "user", Text: request.Text, TurnIndex: turnIndex,
+			SessionID: session.ID, RunID: run.ID, Role: "user", Text: request.Text, TurnIndex: turnIndex,
 			InputMode: request.InputMode, ClientRequestID: clientRequestID,
 		}); err != nil {
+			return err
+		}
+		if err := tx.UpdateConversationRun(ctx, run); err != nil {
 			return err
 		}
 		return tx.UpdateNightSession(ctx, session)
@@ -394,17 +418,17 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 		return *duplicateResponse, nil
 	}
 
-	turns, err := s.store.ListConversationTurns(ctx, sessionID)
+	turns, err := s.store.ListConversationTurnsByRun(ctx, runID)
 	if err != nil {
-		s.releaseProcessingLease(ctx, sessionID)
+		s.releaseProcessingLease(ctx, sessionID, runID)
 		return dto.ConversationTurnResponse{}, NewError("storage_error", "读取对话历史失败", err)
 	}
 	cards, err := s.store.ListMemoryCards(ctx, userID, 7)
 	if err != nil {
-		s.releaseProcessingLease(ctx, sessionID)
+		s.releaseProcessingLease(ctx, sessionID, runID)
 		return dto.ConversationTurnResponse{}, NewError("storage_error", "读取记忆卡失败", err)
 	}
-	aiRequest := ai.Request{Persona: profile.Persona, TurnIndex: turnIndex, Text: request.Text}
+	aiRequest := ai.Request{Mode: ai.ModeReply, Persona: profile.Persona, TurnIndex: turnIndex, Text: request.Text}
 	for _, turn := range turns {
 		aiRequest.Turns = append(aiRequest.Turns, ai.Turn{Role: turn.Role, Text: turn.Text})
 	}
@@ -416,7 +440,7 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 		if s.logger != nil {
 			s.logger.ErrorContext(ctx, "conversation AI generation failed", "sessionId", sessionID, "turnId", request.ClientRequestID, "turnIndex", turnIndex, "errorCategory", "ai_error", "error", err)
 		}
-		s.releaseProcessingLease(ctx, sessionID)
+		s.releaseProcessingLease(ctx, sessionID, runID)
 		return dto.ConversationTurnResponse{}, NewError("ai_error", "生成睡前回复失败", err)
 	}
 	if s.logger != nil {
@@ -430,6 +454,13 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 		session, err := tx.GetNightSessionByID(ctx, sessionID, true)
 		if err != nil {
 			return err
+		}
+		run, err := tx.GetConversationRun(ctx, userID, runID, true)
+		if err != nil {
+			return err
+		}
+		if run.Status != model.ConversationRunActive {
+			return &Error{Code: "invalid_transition", Message: "conversation run 已结束", Details: map[string]any{"runStatus": run.Status}}
 		}
 		draft, err := json.Marshal(result)
 		if err != nil {
@@ -450,7 +481,7 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 			clientRequestID = &request.ClientRequestID
 		}
 		if err := tx.CreateConversationTurn(ctx, &model.ConversationTurn{
-			SessionID: session.ID, Role: "assistant", Text: result.Reply, TurnIndex: turnIndex,
+			SessionID: session.ID, RunID: run.ID, Role: "assistant", Text: result.Reply, TurnIndex: turnIndex,
 			Fallback: result.Fallback, InputMode: request.InputMode, ClientRequestID: clientRequestID,
 			Result: model.JSON(json.RawMessage(draft)),
 		}); err != nil {
@@ -470,6 +501,10 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 		if err := tx.UpdateNightSession(ctx, session); err != nil {
 			return err
 		}
+		run.CompletedTurns = completedTurnsAfterReply(run.CompletedTurns, turnIndex)
+		if err := tx.UpdateConversationRun(ctx, run); err != nil {
+			return err
+		}
 		response = dto.ConversationTurnResponse{Result: result, Tonight: dto.TonightFromModels(session, profile)}
 		if card != nil {
 			converted := dto.MemoryCardFromModel(card)
@@ -486,6 +521,222 @@ func (s *ConversationService) Turn(ctx context.Context, userID string, request d
 		publish(s.hub, userID, "journal.created", response.Journal)
 	}
 	return response, nil
+}
+
+func (s *ConversationService) FinishRun(ctx context.Context, userID string, runID uuid.UUID, eventID string) (dto.FinalizeResponse, error) {
+	eventID = strings.TrimSpace(eventID)
+	if runID == uuid.Nil || eventID == "" {
+		return dto.FinalizeResponse{}, NewError("validation_error", "runId 和 finish eventId 不能为空", nil)
+	}
+	if existing, err := s.store.GetMemoryCardByRun(ctx, runID); err == nil {
+		profile, profileErr := s.store.GetOrCreateProfile(ctx, userID)
+		if profileErr != nil {
+			return dto.FinalizeResponse{}, NewError("storage_error", "读取用户设置失败", profileErr)
+		}
+		session, sessionErr := s.store.GetNightSessionByID(ctx, existing.SessionID, false)
+		if sessionErr != nil {
+			return dto.FinalizeResponse{}, NewError("storage_error", "读取今晚状态失败", sessionErr)
+		}
+		return dto.FinalizeResponse{Journal: dto.MemoryCardFromModel(existing), Tonight: dto.TonightFromModels(session, profile)}, nil
+	} else if !errors.Is(err, repository.ErrNotFound) {
+		return dto.FinalizeResponse{}, NewError("storage_error", "读取 run 日记失败", err)
+	}
+
+	profile, err := s.store.GetOrCreateProfile(ctx, userID)
+	if err != nil {
+		return dto.FinalizeResponse{}, NewError("storage_error", "读取用户设置失败", err)
+	}
+	var sessionID uuid.UUID
+	var turns []model.ConversationTurn
+	err = s.store.WithTx(ctx, func(tx repository.Store) error {
+		run, err := tx.GetConversationRun(ctx, userID, runID, true)
+		if err != nil {
+			return err
+		}
+		if run.Status == model.ConversationRunCompleted {
+			return repository.ErrNotFound
+		}
+		if run.FinishEventID != nil && *run.FinishEventID != eventID {
+			return NewError("finish_in_progress", "该 run 已由另一个 finish 事件结束", nil)
+		}
+		run.FinishEventID = &eventID
+		run.Status = model.ConversationRunFinishing
+		run.ProcessingTurnID = nil
+		if err := tx.UpdateConversationRun(ctx, run); err != nil {
+			return err
+		}
+		if err := tx.DeleteIncompleteConversationTurnsByRun(ctx, runID); err != nil {
+			return err
+		}
+		sessionID = run.NightSessionID
+		turns, err = tx.ListConversationTurnsByRun(ctx, runID)
+		return err
+	})
+	if err != nil {
+		return dto.FinalizeResponse{}, normalizeServiceError(err, "开始结束 conversation run 失败")
+	}
+
+	request := journalRequest(turns)
+	result := emptyJournalResult()
+	if len(request.Turns) > 0 {
+		result, err = s.ai.Generate(ctx, request)
+		if err != nil {
+			return dto.FinalizeResponse{}, NewError("ai_error", "生成晚安日记失败", err)
+		}
+		result.ShouldFinalize = true
+	}
+	result.SuggestedGuidance = sleepGuidance(result.SuggestedGuidance)
+	now := s.now().UTC()
+	var response dto.FinalizeResponse
+	err = s.store.WithTx(ctx, func(tx repository.Store) error {
+		run, err := tx.GetConversationRun(ctx, userID, runID, true)
+		if err != nil {
+			return err
+		}
+		if card, err := tx.GetMemoryCardByRun(ctx, runID); err == nil {
+			session, sessionErr := tx.GetNightSessionByID(ctx, card.SessionID, true)
+			if sessionErr != nil {
+				return sessionErr
+			}
+			response = dto.FinalizeResponse{Journal: dto.MemoryCardFromModel(card), Tonight: dto.TonightFromModels(session, profile)}
+			return nil
+		} else if !errors.Is(err, repository.ErrNotFound) {
+			return err
+		}
+		session, err := tx.GetNightSessionByID(ctx, sessionID, true)
+		if err != nil {
+			return err
+		}
+		card := memoryCard(session, userID, result, now)
+		card.RunID = runID
+		if err := tx.CreateMemoryCard(ctx, card); err != nil {
+			return err
+		}
+		if session.Phase == string(state.Conversation) || session.Phase == string(state.Locked) {
+			next, err := state.Apply(snapshot(session), state.Finalize)
+			if err != nil {
+				return err
+			}
+			applySnapshot(session, next)
+		}
+		session.FinalizeReason = "device_key"
+		clearConversationTiming(session)
+		if err := tx.UpdateNightSession(ctx, session); err != nil {
+			return err
+		}
+		run.Status = model.ConversationRunCompleted
+		run.CompletedTurns = session.ConversationTurns
+		run.Guidance = result.SuggestedGuidance
+		run.GuidanceStatus = model.GuidancePending
+		run.FinishedAt = &now
+		if err := tx.UpdateConversationRun(ctx, run); err != nil {
+			return err
+		}
+		response = dto.FinalizeResponse{Journal: dto.MemoryCardFromModel(card), Tonight: dto.TonightFromModels(session, profile)}
+		return nil
+	})
+	if err != nil {
+		return dto.FinalizeResponse{}, normalizeServiceError(err, "完成 conversation run 失败")
+	}
+	publish(s.hub, userID, "journal.created", response.Journal)
+	publish(s.hub, userID, "tonight.updated", response.Tonight)
+	return response, nil
+}
+
+func (s *ConversationService) CompleteReplyDelivery(ctx context.Context, userID string, runID uuid.UUID, turnID string) error {
+	turnID = strings.TrimSpace(turnID)
+	if runID == uuid.Nil || turnID == "" {
+		return NewError("validation_error", "runId 和 turnId 不能为空", nil)
+	}
+	err := s.store.WithTx(ctx, func(tx repository.Store) error {
+		run, err := tx.GetConversationRun(ctx, userID, runID, true)
+		if err != nil {
+			return err
+		}
+		if run.ProcessingTurnID == nil || *run.ProcessingTurnID != turnID {
+			return nil
+		}
+		run.ProcessingTurnID = nil
+		return tx.UpdateConversationRun(ctx, run)
+	})
+	if err != nil {
+		return normalizeServiceError(err, "确认回复播放失败")
+	}
+	return nil
+}
+
+func (s *ConversationService) UpdateGuidanceStatus(ctx context.Context, userID string, runID uuid.UUID, status string) error {
+	if runID == uuid.Nil || !oneOf(status, model.GuidancePlaying, model.GuidanceInterrupted, model.GuidanceCompleted) {
+		return NewError("validation_error", "runId 或 guidance status 无效", nil)
+	}
+	err := s.store.WithTx(ctx, func(tx repository.Store) error {
+		run, err := tx.GetConversationRun(ctx, userID, runID, true)
+		if err != nil {
+			return err
+		}
+		if run.Status != model.ConversationRunCompleted {
+			return &Error{Code: "invalid_transition", Message: "conversation run 尚未完成", Details: map[string]any{"status": run.Status}}
+		}
+		switch status {
+		case model.GuidancePlaying:
+			if run.GuidanceStatus == model.GuidanceCompleted {
+				return &Error{Code: "invalid_transition", Message: "guidance 已完成", Details: map[string]any{"guidanceStatus": run.GuidanceStatus}}
+			}
+		case model.GuidanceCompleted, model.GuidanceInterrupted:
+			if run.GuidanceStatus != model.GuidancePlaying {
+				return &Error{Code: "invalid_transition", Message: "guidance 未在播放", Details: map[string]any{"guidanceStatus": run.GuidanceStatus}}
+			}
+		}
+		run.GuidanceStatus = status
+		return tx.UpdateConversationRun(ctx, run)
+	})
+	if err != nil {
+		return normalizeServiceError(err, "更新 guidance 状态失败")
+	}
+	return nil
+}
+
+func journalRequest(turns []model.ConversationTurn) ai.Request {
+	completeIndexes := make(map[int]bool)
+	for _, turn := range turns {
+		if turn.Role == "assistant" {
+			completeIndexes[turn.TurnIndex] = true
+		}
+	}
+	request := ai.Request{Mode: ai.ModeJournal}
+	var userTexts []string
+	for _, turn := range turns {
+		if !completeIndexes[turn.TurnIndex] {
+			continue
+		}
+		request.Turns = append(request.Turns, ai.Turn{Role: turn.Role, Text: turn.Text})
+		if turn.Role == "user" {
+			userTexts = append(userTexts, turn.Text)
+		}
+	}
+	request.Text = strings.Join(userTexts, "\n")
+	return request
+}
+
+func sleepGuidance(value string) string {
+	if value == "breathing_46" {
+		return value
+	}
+	return "rain"
+}
+
+func emptyJournalResult() dto.AIResult {
+	return dto.AIResult{
+		Reply:             "今晚没有想说的也没关系，安心休息吧。",
+		Emotion:           "平静",
+		Worry:             "今晚没有留下具体的心事",
+		TomorrowTask:      "明天醒来后照顾好自己",
+		Comfort:           "今晚没有想说的也没关系，安心休息吧。",
+		GuidanceOptions:   []string{"rain", "brown_noise", "breathing_46", "silence"},
+		SuggestedGuidance: "rain",
+		ShouldFinalize:    true,
+		Fallback:          true,
+	}
 }
 
 func (s *ConversationService) Finalize(ctx context.Context, userID string) (dto.FinalizeResponse, error) {
@@ -526,14 +777,22 @@ func (s *ConversationService) FinalizeWithReason(ctx context.Context, userID, re
 	return response, nil
 }
 
-func (s *ConversationService) releaseProcessingLease(ctx context.Context, sessionID uuid.UUID) {
+func (s *ConversationService) releaseProcessingLease(ctx context.Context, sessionID, runID uuid.UUID) {
 	_ = s.store.WithTx(ctx, func(tx repository.Store) error {
 		session, err := tx.GetNightSessionByID(ctx, sessionID, true)
 		if err != nil {
 			return err
 		}
 		session.ConversationProcessingUntil = nil
-		return tx.UpdateNightSession(ctx, session)
+		if err := tx.UpdateNightSession(ctx, session); err != nil {
+			return err
+		}
+		run, err := tx.GetConversationRun(ctx, session.UserID, runID, true)
+		if err != nil {
+			return err
+		}
+		run.ProcessingTurnID = nil
+		return tx.UpdateConversationRun(ctx, run)
 	})
 }
 
@@ -557,8 +816,8 @@ func finalResult(ctx context.Context, tx repository.Store, session *model.NightS
 }
 
 func validateConversationFinalization(session *model.NightSession) error {
-	if session.ConversationTurns < 3 {
-		return &Error{Code: "conversation_incomplete", Message: "倾诉尚未完成 3 轮", Details: map[string]any{"phase": session.Phase, "completedTurns": session.ConversationTurns}}
+	if session.ConversationTurns < 0 {
+		return &Error{Code: "invalid_transition", Message: "倾诉轮数无效", Details: map[string]any{"phase": session.Phase, "completedTurns": session.ConversationTurns}}
 	}
 	return nil
 }
@@ -587,6 +846,10 @@ func finalizeSession(ctx context.Context, tx repository.Store, session *model.Ni
 	return card, nil
 }
 
+func conversationExpired(session *model.NightSession, continuousRun bool, now time.Time) bool {
+	return !continuousRun && session.ConversationHardDeadlineAt != nil && !now.Before(*session.ConversationHardDeadlineAt)
+}
+
 func nextTurnIndex(completedTurns int) int {
 	return completedTurns + 1
 }
@@ -598,10 +861,7 @@ func completedTurnsAfterReply(current, turnIndex int) int {
 	return current
 }
 
-func conversationFinalizePolicy(turnIndex int, _ dto.AIResult) (bool, string) {
-	if turnIndex >= 3 {
-		return true, "turn_limit"
-	}
+func conversationFinalizePolicy(_ int, _ dto.AIResult) (bool, string) {
 	return false, ""
 }
 

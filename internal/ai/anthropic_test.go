@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,6 +57,34 @@ func TestAnthropicAdapterGenerate(t *testing.T) {
 	}
 }
 
+func TestAnthropicAdapterUsesJournalPromptForJournalMode(t *testing.T) {
+	server := newAnthropicTestServer(t, func(t *testing.T, request map[string]any) {
+		system, ok := request["system"].([]any)
+		if !ok || len(system) != 1 {
+			t.Fatalf("system = %#v", request["system"])
+		}
+		systemText, _ := system[0].(map[string]any)["text"].(string)
+		if !strings.Contains(systemText, "晚安日记编辑") || strings.Contains(systemText, "本轮任务") {
+			t.Fatalf("journal system prompt = %q", systemText)
+		}
+		messages, ok := request["messages"].([]any)
+		if !ok || len(messages) != 1 {
+			t.Fatalf("messages = %#v", request["messages"])
+		}
+		content := messages[0].(map[string]any)["content"].([]any)
+		userText, _ := content[0].(map[string]any)["text"].(string)
+		if !strings.Contains(userText, "完整对话整理晚安日记") {
+			t.Fatalf("journal user instruction = %q", userText)
+		}
+	})
+	defer server.Close()
+
+	adapter := NewAnthropicAdapter("test-key", "", server.URL, "claude-opus-4-8", server.Client())
+	if _, err := adapter.Generate(context.Background(), Request{Mode: ModeJournal, Turns: []Turn{{Role: "user", Text: "今天有点累"}}}); err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+}
+
 func TestAnthropicAdapterUsesAuthToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("authorization") != "Bearer test-token" {
@@ -75,17 +104,17 @@ func TestAnthropicAdapterUsesAuthToken(t *testing.T) {
 	}
 }
 
-func TestAnthropicAdapterForcesThirdTurnFinalize(t *testing.T) {
+func TestAnthropicAdapterDoesNotForceThirdTurnFinalize(t *testing.T) {
 	server := newAnthropicTestServer(t, nil)
 	defer server.Close()
 
 	adapter := NewAnthropicAdapter("test-key", "", server.URL, "claude-opus-4-8", server.Client())
-	result, err := adapter.Generate(context.Background(), Request{TurnIndex: 3, Text: "还是有点担心"})
+	result, err := adapter.Generate(context.Background(), Request{Mode: ModeReply, TurnIndex: 3, Text: "还是有点担心"})
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if !result.ShouldFinalize {
-		t.Fatal("third turn must finalize even if the model returns false")
+	if result.ShouldFinalize {
+		t.Fatal("third turn unexpectedly finalized")
 	}
 }
 

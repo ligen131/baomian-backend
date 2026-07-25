@@ -40,6 +40,25 @@ func TestDeviceVoiceControllerRequiresDeviceID(t *testing.T) {
 	}
 }
 
+func TestWebsocketVoiceOutputAddsRunContextToControllerErrors(t *testing.T) {
+	messages := make(chan voiceOutboundMessage, 2)
+	output := &websocketVoiceOutput{messages: messages}
+	if err := output.SendEvent(context.Background(), voice.ServerEvent{Type: voice.EventSessionReady, RunID: "run-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := output.SendEvent(context.Background(), voice.ServerEvent{
+		Type: voice.EventError, Code: voice.ErrorInvalidEvent, Message: "invalid",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-messages
+	message := <-messages
+	event := message.payload.(voice.ServerEvent)
+	if event.RunID != "run-1" || event.TerminalFor != "event" || event.OccurredAt == "" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
 func TestWebsocketVoiceOutputBackpressuresUntilQueueHasSpace(t *testing.T) {
 	messages := make(chan voiceOutboundMessage, 1)
 	output := &websocketVoiceOutput{messages: messages}
@@ -99,7 +118,7 @@ func TestDeviceVoiceControllerDeliversPlaybackEndAfterBurstPCM(t *testing.T) {
 	if _, _, err := connection.ReadMessage(); err != nil {
 		t.Fatal(err)
 	}
-	if err := connection.WriteJSON(voice.ClientEvent{Type: voice.EventSessionStart, EventID: "start-1"}); err != nil {
+	if err := connection.WriteJSON(voice.ClientEvent{Type: voice.EventSessionStart, RunID: "run-1", EventID: "start-1"}); err != nil {
 		t.Fatal(err)
 	}
 	var started voice.ServerEvent
@@ -155,7 +174,7 @@ func TestDeviceVoiceControllerWebSocketSmoke(t *testing.T) {
 	if ready.Type != voice.EventSessionReady || ready.CompletedTurns != 0 {
 		t.Fatalf("ready = %#v", ready)
 	}
-	if err := connection.WriteJSON(voice.ClientEvent{Type: voice.EventSessionStart, EventID: "start-1"}); err != nil {
+	if err := connection.WriteJSON(voice.ClientEvent{Type: voice.EventSessionStart, RunID: "run-1", EventID: "start-1"}); err != nil {
 		t.Fatal(err)
 	}
 	var started voice.ServerEvent

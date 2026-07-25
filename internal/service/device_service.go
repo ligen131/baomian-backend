@@ -24,6 +24,9 @@ type DeviceService struct {
 	conversationSilenceTimeout time.Duration
 	conversationMaxDuration    time.Duration
 	phoneRemovedResumeWindow   time.Duration
+	demoContinuousConversation bool
+	demoUserID                 string
+	demoDeviceID               string
 	logger                     *slog.Logger
 	now                        func() time.Time
 }
@@ -52,6 +55,12 @@ func NewDeviceService(
 		logger:                     serviceLogger,
 		now:                        time.Now,
 	}
+}
+
+func (s *DeviceService) ConfigureDemoContinuousConversation(enabled bool, userID, deviceID string) {
+	s.demoContinuousConversation = enabled
+	s.demoUserID = userID
+	s.demoDeviceID = deviceID
 }
 
 func (s *DeviceService) HandleEvent(ctx context.Context, request dto.DeviceEventRequest) (dto.DeviceEventResponse, error) {
@@ -97,7 +106,27 @@ func (s *DeviceService) HandleEvent(ctx context.Context, request dto.DeviceEvent
 			return err
 		}
 		commands := []model.DeviceCommand(nil)
-		if idempotentBoxClosed(request.Type, session) {
+		var run *model.ConversationRun
+		if candidate, demoReset := newDemoConversationRun(
+			request, userID, s.demoContinuousConversation, s.demoUserID, s.demoDeviceID,
+			session, s.now().UTC(),
+		); demoReset {
+			if previous, getErr := tx.GetActiveConversationRun(ctx, userID, request.DeviceID, true); getErr == nil {
+				previous.Status = model.ConversationRunAborted
+				finishedAt := s.now().UTC()
+				previous.FinishedAt = &finishedAt
+				if err := tx.UpdateConversationRun(ctx, previous); err != nil {
+					return err
+				}
+			} else if !errors.Is(getErr, repository.ErrNotFound) {
+				return getErr
+			}
+			run = candidate
+			if err := tx.CreateConversationRun(ctx, run); err != nil {
+				return err
+			}
+			commands = deviceCommands(userID, request.DeviceID, request.Type, state.Locked)
+		} else if idempotentBoxClosed(request.Type, session) {
 			if s.logger != nil {
 				s.logger.InfoContext(ctx, "device state event already satisfied", "eventId", request.EventID, "deviceId", request.DeviceID, "phase", session.Phase, "eventType", request.Type)
 			}
@@ -140,6 +169,9 @@ func (s *DeviceService) HandleEvent(ctx context.Context, request dto.DeviceEvent
 			converted = append(converted, dto.CommandFromModel(&commands[i]))
 		}
 		response = dto.DeviceEventResponse{Tonight: dto.TonightFromModels(session, profile), Commands: converted}
+		if run != nil {
+			response.RunID = run.ID
+		}
 		result, err := json.Marshal(response)
 		if err != nil {
 			return err
@@ -238,6 +270,44 @@ func (s *DeviceService) Ack(ctx context.Context, request dto.CommandAckRequest) 
 		return dto.Command{}, NewError("storage_error", "确认设备命令失败", err)
 	}
 	return dto.CommandFromModel(command), nil
+}
+
+func newDemoConversationRun(
+	request dto.DeviceEventRequest,
+	userID string,
+	enabled bool,
+	demoUserID string,
+	demoDeviceID string,
+	session *model.NightSession,
+	now time.Time,
+) (*model.ConversationRun, bool) {
+	source, _ := request.Payload["source"].(string)
+	if !enabled || request.Type != "box_closed" || source != "reset_button" ||
+		userID != demoUserID || request.DeviceID != demoDeviceID {
+		return nil, false
+	}
+
+	session.Phase = string(state.Locked)
+	session.ResumePhase = ""
+	session.BoxClosed = true
+	session.ConversationTurns = 0
+	session.SelectedGuidance = ""
+	session.AudioPlaying = false
+	session.PausedForTonight = false
+	session.FinalizeReason = ""
+	session.LatestAIDraft = model.JSON(map[string]any{})
+	session.ConversationStartedAt = nil
+	session.ConversationLastActivityAt = nil
+	session.ConversationSilenceDeadlineAt = nil
+	session.ConversationHardDeadlineAt = nil
+	session.ConversationProcessingUntil = nil
+	session.AudioEndsAt = nil
+
+	return &model.ConversationRun{
+		ID: uuid.New(), UserID: userID, DeviceID: request.DeviceID,
+		NightSessionID: session.ID, Date: session.Date, Status: model.ConversationRunActive,
+		GuidanceStatus: model.GuidancePending, StartedAt: now,
+	}, true
 }
 
 func idempotentBoxClosed(eventType string, session *model.NightSession) bool {

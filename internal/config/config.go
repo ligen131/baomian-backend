@@ -40,6 +40,8 @@ type Config struct {
 	VoiceMaxUtteranceDuration      time.Duration
 	VoiceOpeningText               string
 	VoiceBreathingScript           string
+	DemoRainAudioPath              string
+	DemoBreathingAudioPath         string
 	DeviceLongPollTimeout          time.Duration
 	ConversationSilenceTimeout     time.Duration
 	ConversationMaxDuration        time.Duration
@@ -75,6 +77,8 @@ func Load() (Config, error) {
 		VolcengineTTSSpeaker:        env("VOLCENGINE_TTS_SPEAKER", "zh_female_gaolengyujie_uranus_bigtts"),
 		VoiceOpeningText:            env("VOICE_OPENING_TEXT", "手机已经安放好了。今晚有什么想和眠眠说的吗？"),
 		VoiceBreathingScript:        env("VOICE_BREATHING_SCRIPT", "跟着眠眠，慢慢吸气四秒，再轻轻呼气六秒。"),
+		DemoRainAudioPath:           strings.TrimSpace(os.Getenv("DEMO_RAIN_AUDIO_PATH")),
+		DemoBreathingAudioPath:      strings.TrimSpace(os.Getenv("DEMO_BREATHING_AUDIO_PATH")),
 		LogLevel:                    strings.ToLower(env("LOG_LEVEL", "info")),
 	}
 
@@ -144,6 +148,10 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("AI_PROVIDER must be anthropic or openai_compatible")
 	}
 	return cfg, nil
+}
+
+func (c Config) VolcengineTTSConfigured() bool {
+	return strings.TrimSpace(c.VolcengineTTSAPIKey) != ""
 }
 
 func (c Config) VolcengineSpeechConfigured() bool {

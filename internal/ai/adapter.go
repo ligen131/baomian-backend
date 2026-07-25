@@ -21,7 +21,13 @@ type Memory struct {
 	Comfort      string `json:"comfort"`
 }
 
+const (
+	ModeReply   = "reply"
+	ModeJournal = "journal"
+)
+
 type Request struct {
+	Mode      string   `json:"mode"`
 	Persona   string   `json:"persona"`
 	TurnIndex int      `json:"turnIndex"`
 	Text      string   `json:"text"`

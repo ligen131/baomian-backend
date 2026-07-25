@@ -124,6 +124,17 @@ func TestLoadVolcengineASRFinalTimeout(t *testing.T) {
 	}
 }
 
+func TestVolcengineTTSConfiguredRequiresOnlyTTSKey(t *testing.T) {
+	cfg := Config{VolcengineTTSAPIKey: "tts-key"}
+	if !cfg.VolcengineTTSConfigured() {
+		t.Fatal("TTS key alone should configure the standalone TTS endpoint")
+	}
+	cfg.VolcengineTTSAPIKey = ""
+	if cfg.VolcengineTTSConfigured() {
+		t.Fatal("empty TTS key must not configure TTS")
+	}
+}
+
 func TestVolcengineSpeechConfiguredRequiresASRAndTTSKeys(t *testing.T) {
 	cfg := Config{
 		VolcengineSpeechAppID:       "app",

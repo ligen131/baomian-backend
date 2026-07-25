@@ -21,7 +21,7 @@ func (a *FallbackAdapter) Generate(_ context.Context, request Request) (dto.AIRe
 		Comfort:           "现在可以先休息，这件事已经被记下了。",
 		GuidanceOptions:   guidanceOptions(),
 		SuggestedGuidance: "breathing_46",
-		ShouldFinalize:    request.TurnIndex >= 3,
+		ShouldFinalize:    false,
 		Fallback:          true,
 	}
 

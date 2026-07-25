@@ -2,6 +2,8 @@
 
 抱眠 P0+P1 演示后端，提供 Android 状态接口、T5 双向流式语音、火山引擎 ASR/TTS、Anthropic Claude、状态机、后台计时协调器与 PostgreSQL 持久化能力。本仓库不包含 Android 或 T5 固件代码。
 
+> 连续演示契约：RESET 幂等创建 conversation run，T5 本地 VAD 自动录音，不限轮连续对话；KEY 幂等结束 run、append 晚安日记并流式播放睡眠素材。前端可独立调用 `POST /api/v1/tts/stream`。权威 Voice 消息定义见 [`api/device-voice.schema.json`](api/device-voice.schema.json)。
+
 ## 技术栈
 
 - Go 1.24+
@@ -18,7 +20,7 @@
 
 - 今晚状态机：`WAITING_TO_LOCK → LOCKED → CONVERSATION → CHOOSING_GUIDANCE → SLEEPING → SUNRISE → AWAKE`
 - 开仓异常状态 `PHONE_REMOVED` 及闭仓恢复
-- 固定 3 轮睡前倾诉与记忆卡生成；不足 3 轮不会进入引导阶段
+- RESET 创建独立 conversation run；睡前倾诉不限轮，只有 KEY 发出的 `conversation.finish` 才生成晚安日记并进入引导
 - Claude 主适配器 + 本地 `FallbackAdapter` + 高风险固定提示
 - T5 设备事件幂等、设备命令长轮询和 ACK
 - 按 Demo 用户分组的 WebSocket 广播
@@ -27,8 +29,8 @@
 ## P1 新增能力
 
 - Profile IANA 时区、提醒开关和“今晚跳过提醒”；提醒和闹钟由 Android 本地调度。
-- 倾诉 20 秒静默、4 分钟硬截止、activity 上报、完整历史恢复和 `clientRequestId` 幂等。
-- T5 通过独立 Voice WebSocket 流式上行 PCM；后端桥接火山引擎 ASR、现有 Claude 三轮服务和火山引擎 TTS，再向 T5 流式下发 PCM。
+- conversation run、`runId + clientRequestId` 幂等、结构化断线恢复和同日多篇晚安日记。
+- T5 通过独立 Voice WebSocket 流式上行 PCM；后端桥接火山引擎 ASR、Claude 连续对话和火山引擎 TTS，再向 T5 流式下发 PCM。
 - Android 只负责设置、状态、设备在线和晚安日记；正式路径不录音、不 STT、不 TTS。
 - 后端不持久化原始音频；开仓后有 10 分钟恢复窗口，白噪音按 10/20/30 分钟自动停止。
 - 晚安卡详情、明日待办完成/取消、历史单卡与对应对话删除。
@@ -53,7 +55,7 @@ cp .env.example .env
 | `DATABASE_URL` | 本地 baomian PostgreSQL | PostgreSQL DSN |
 | `DEMO_USER_ID` | `expo-user-001` | 默认演示用户 |
 | `DEFAULT_DEVICE_ID` | `expo-device-001` | APP action 对应的默认设备 |
-| `DEMO_CONTINUOUS_CONVERSATION` | `false` | 仅对上述固定演示用户和设备生效；Voice 建连时将已过期/已完成会话轮转为 `LOCKED + 0` |
+| `DEMO_CONTINUOUS_CONVERSATION` | `false` | 仅对上述固定演示用户和设备生效；RESET `box_closed(source=reset_button)` 创建新 run并重置为 `LOCKED + 0` |
 | `AI_PROVIDER` | `anthropic` | AI 协议：`anthropic` 或 `openai_compatible` |
 | `ANTHROPIC_API_KEY` | 空 | API Key；与 Auth Token 均为空时自动走本地 fallback |
 | `ANTHROPIC_AUTH_TOKEN` | 空 | Bearer Auth Token；与 API Key 同时设置时优先使用此项 |
@@ -70,7 +72,9 @@ cp .env.example .env
 | `VOLCENGINE_TTS_SPEAKER` | `zh_female_gaolengyujie_uranus_bigtts` | TTS speaker；必须对 API Key 可用 |
 | `VOLCENGINE_ASR_TIMEOUT` | `20s` | ASR 建连、初始化和单次写操作上限 |
 | `VOLCENGINE_ASR_FINAL_TIMEOUT` | `8s` | `input.end` 后等待最终识别结果上限；超时明确返回 `asr_unavailable` |
-| `VOICE_MAX_UTTERANCE_DURATION` | `60s` | 单次长按说话上限 |
+| `VOICE_MAX_UTTERANCE_DURATION` | `60s` | 单轮说话上限 |
+| `DEMO_RAIN_AUDIO_PATH` | `/home/ligen/tmp/rainy.wav` | KEY 后雨声素材；流式下混/重采样为 24 kHz mono PCM |
+| `DEMO_BREATHING_AUDIO_PATH` | `/home/ligen/tmp/miao.mp3` | KEY 后呼吸引导素材；流式解码为 24 kHz mono PCM |
 | `DEVICE_LONG_POLL_TIMEOUT` | `20s` | 设备命令长轮询默认时长，服务端最大 30 秒 |
 | `CONVERSATION_SILENCE_TIMEOUT` | `20s` | 倾诉静默自动收尾时间 |
 | `CONVERSATION_MAX_DURATION` | `4m` | 倾诉硬截止 |
@@ -157,7 +161,7 @@ SafetyAdapter
 - CLI Proxy 路径使用 `response_format.type=json_schema` 与相同 JSON Schema
 - 不发送 `temperature`、`top_p` 或 `top_k`
 - 本地再次校验必填文本、固定 guidance 顺序和推荐值
-- 第 3 轮由服务端强制 `shouldFinalize=true`
+- reply 模式始终由服务端强制 `shouldFinalize=false`；KEY finish 使用 `ModeJournal` 总结当前 run 的全部完整轮次
 - `fallback`、`highRisk` 最终由服务端覆盖，不能由模型决定
 
 CLI Proxy 示例：
@@ -201,7 +205,8 @@ X-Demo-User-Id: expo-user-001
 | GET | `/api/v1/conversations/tonight` | 完整对话恢复 |
 | POST | `/api/v1/conversations/activity` | 延长静默截止 |
 | POST | `/api/v1/conversations/turn` | Debug 文字入口；T5 ASR 在后端内部复用同一服务 |
-| POST | `/api/v1/conversations/finalize` | Debug 收尾；不足 3 轮返回 409 |
+| POST | `/api/v1/conversations/finalize` | 兼容 Debug 收尾；硬件正式路径使用 `conversation.finish` |
+| POST | `/api/v1/tts/stream` | 前端文本流式 TTS，返回 24 kHz mono PCM |
 | GET | `/api/v1/journals?limit=7` | 最近记忆卡 |
 | GET/PATCH/DELETE | `/api/v1/journals/{id}` | 单卡详情、待办状态和删除 |
 | GET | `/api/v1/memories?limit=7` | journals 别名 |
@@ -255,7 +260,7 @@ ws://localhost:8080/api/v1/device/voice?deviceId=expo-device-001&userId=expo-use
 
 控制消息是 JSON text message；音频是 PCM signed 16-bit little-endian、24000 Hz、mono、20 ms、960-byte binary message。后端将 10 个 T5 帧聚合成约 200 ms 后发送给火山引擎 ASR；火山引擎 TTS 返回的 24 kHz PCM 会重新切成 960-byte 帧下发 T5。Claude 仍由现有 `ConversationService` 调用。`VoiceSessionService` 是确定性的 Go 协调器，不是 AI Agent。完整协议见 [`docs/hardware-integration.md`](docs/hardware-integration.md) 和 [`docs/voice-streaming-design.md`](docs/voice-streaming-design.md)。
 
-生产模式下，设备启动只上报 heartbeat；`box_closed` 只表示真实闭仓或恢复，绝不表示 reset。固定演示环境可显式开启 `DEMO_CONTINUOUS_CONVERSATION=true`：只有 `DEMO_USER_ID + DEFAULT_DEVICE_ID` 精确匹配时，Voice WebSocket 建连会把已过期或已完成的旧演示会话原子轮转为 `LOCKED + 0`。每个逻辑会话仍严格三轮；完成三轮后如需继续演示，应重新连接 Voice WebSocket，而不是发送第四轮。
+生产模式下，设备启动只上报 heartbeat。固定演示环境可显式开启 `DEMO_CONTINUOUS_CONVERSATION=true`：只有 `DEMO_USER_ID + DEFAULT_DEVICE_ID` 精确匹配且上报 `box_closed`、`payload.source=reset_button` 时，后端才幂等创建新 run、abort 旧活动 run 并重置 NightSession 为 `LOCKED + 0`。新 run 不删除旧 turn 或日记；对话可持续任意轮，直到 KEY 发送 `conversation.finish`。
 
 ## 设备网关
 

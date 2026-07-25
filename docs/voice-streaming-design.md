@@ -1,61 +1,52 @@
-# T5 流式语音对话设计
+# T5 连续语音演示设计
 
-> 状态：已冻结设计
-> 日期：2026-07-24
-> 适用范围：抱眠 MVP 的 T5 语音对话、火山引擎流式 ASR/TTS、Claude 三轮对话及晚安引导
+> 状态：后端已实现，待部署环境验证与 T5 固件联调
+> 日期：2026-07-25
+> 适用范围：抱眠硬件联调、连续 AI 对话、睡眠引导、晚安日记和前端流式 TTS
 
-## 1. 目标与边界
+## 1. 演示目标
 
-正式产品流程是用户与 T5 抱枕对话，而不是与 Android 对话：
+演示流程固定为：
 
 ```text
-手机锁入锁盒
-→ T5 播放温柔开场白
-→ 用户与 T5 完成 3 轮自然对话
-→ 播放白噪音或呼吸引导
-→ Android 展示晚安日记
+按住板载 RESET（box_closed）
+→ 后端流式播放开场引导
+→ T5 自动开始录音并实时上传 PCM
+→ T5 检测静默后自动结束本轮
+→ 后端 ASR → Claude → TTS，流式返回回复音频
+→ 回复播完后 T5 自动开始下一轮录音
+→ 重复任意轮，不限制三轮
+→ 按住板载 KEY 结束对话
+→ 后端总结完整对话并追加一篇晚安日记
+→ 后端流式播放睡眠引导音频
+→ 播放结束，本次硬件演示结束
 ```
 
-本设计遵循以下边界：
+正式联调不要求用户在每轮开始或结束时按键。RESET 只负责开始一场新的演示会话，KEY 只负责结束当前会话。
 
-- T5 内存有限，不缓存完整录音，仅保留采集和播放所需的小型环形缓冲区。
-- T5 只连接抱眠后端，不直接连接火山引擎，不持有火山引擎 Token。
-- 后端使用火山引擎流式 ASR 和流式 TTS；AI 对话继续使用现有 Claude structured output，不切换为火山引擎智能体。
-- Android 不参与正式流程的录音、STT 或 TTS，只负责设置、状态和晚安日记展示。
-- 后端不持久化原始音频，不在日志中记录原始音频、完整对话文本或上游凭证。
-- 第一版使用 push-to-talk：长按开始说话，松开结束；不引入服务端 VAD。
-- 一晚最多 3 次有效用户发言，每次用户发言对应一次 Claude 回复。
-
-## 2. 选定架构
+## 2. 总体架构
 
 ```text
 T5
-  ↕ 一条抱眠 Device Voice WebSocket
-Baomian DeviceVoiceController
-  ↕
+  ↕ Device Voice WebSocket（JSON 控制 + raw PCM）
 VoiceSessionService
-  ├── VolcASRClient ── wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
-  ├── ConversationService ── existing Claude Adapter
-  └── VolcTTSClient ── wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream
+  ├→ Volcengine streaming ASR
+  ├→ ConversationService → Claude
+  ├→ Volcengine streaming TTS
+  ├→ SleepAudioService → miao.mp3 / rainy.wav
+  └→ JournalService → append MemoryCard
 
-Android
-  ↕ REST + existing /api/v1/ws
-Profile / Tonight / Device Status / Journal
+前端
+  ├→ POST /api/v1/tts/stream
+  ├→ GET /api/v1/journals
+  └→ GET /api/v1/ws（journal.created 等状态事件）
 ```
 
-采用“单一设备语音 WebSocket + 后端分别桥接火山引擎 ASR/TTS”的原因：
+T5 不保存火山引擎或 Claude 凭证。后端不持久化原始录音，也不在日志中记录完整录音、完整转写或对话正文。
 
-- T5 只维护一条业务连接，固件和内存负担最低。
-- 火山引擎 Token 只保存在后端。
-- T5 与后端使用二进制 PCM，避免 Base64 增加约 33% 的设备侧传输和处理成本。
-- 现有 `ConversationService` 继续负责三轮规则、Claude、幂等、持久化和晚安卡，不复制业务逻辑。
-- 火山引擎仅提供语音能力，不改变 Claude 对话质量和 structured output 契约。
+## 3. 音频契约
 
-现有 `/api/v1/ws` 继续只承载 Android JSON 状态事件。设备语音使用独立路由，禁止在两条通道之间混发消息。
-
-## 3. 音频格式
-
-T5 上行和后端下行统一使用：
+T5 Voice WebSocket 和前端流式 TTS 都使用相同的原始 PCM：
 
 | 参数 | 值 |
 |---|---|
@@ -63,548 +54,390 @@ T5 上行和后端下行统一使用：
 | 字节序 | little-endian |
 | 采样率 | 24000 Hz |
 | 位深 | 16 bit |
-| 声道 | 1（mono） |
-| 帧长 | 20 ms |
-| 每帧大小 | 960 bytes |
+| 声道 | mono |
+| T5 帧长 | 20 ms |
+| T5 每帧 | 960 bytes |
 
-计算方式：`24000 × 0.02 × 2 × 1 = 960 bytes`。
+T5 WebSocket binary message 必须恰好为 960 bytes。前端 HTTP 流不承诺每个网络 chunk 都是 960 bytes，前端应把响应视为连续 PCM 字节流并自行缓冲。
 
-约束：
+## 4. 前端文本流式 TTS
 
-- WebSocket 二进制消息只包含 PCM payload，不包含 WAV header 或自定义包头。
-- 正常采集期间，每条二进制消息必须为 960 bytes。
-- 最后一帧也必须补齐至 960 bytes；T5 不发送半帧。
-- 每方向原始音频带宽约为 48 KB/s，不含 WebSocket/TLS 开销。
-- T5 播放端使用有界环形缓冲，建议缓存 100–300 ms，禁止缓存完整回复。
+### 4.1 请求
 
-## 4. 连接与会话
+```http
+POST /api/v1/tts/stream
+Content-Type: application/json
+X-Demo-User-Id: expo-user-001
 
-连接地址：
+{"text":"今晚辛苦了，先慢慢放松下来吧。"}
+```
+
+请求体：
+
+```json
+{
+  "text": "非空中文或其他 UTF-8 文本，最多 500 个 Unicode 字符"
+}
+```
+
+该接口只做文本转语音：
+
+- 不创建 ConversationTurn。
+- 不增加对话轮数。
+- 不修改 Tonight phase。
+- 不创建晚安日记。
+- 与 Device Voice WebSocket 相互独立。
+
+### 4.2 成功响应
+
+```http
+HTTP/1.1 200 OK
+Content-Type: audio/pcm;codec=pcm_s16le;rate=24000;channels=1
+Cache-Control: no-store
+X-Audio-Codec: pcm_s16le
+X-Audio-Sample-Rate: 24000
+X-Audio-Bit-Depth: 16
+X-Audio-Channels: 1
+```
+
+响应 body 是边合成边写出的 raw PCM。服务端拿到火山引擎首个 PCM chunk 后立即 flush，不等待整段语音生成完毕。前端通过 `ReadableStream` 持续读取并放入有界播放缓冲。
+
+### 4.3 错误
+
+在响应 header 尚未发送前：
+
+- `400 validation_error`：JSON 无效、`text` 为空或超过 500 字符。
+- `503 speech_not_configured`：TTS 未配置。
+- `502 tts_unavailable`：火山引擎在首个音频 chunk 前失败。
+
+响应已经开始后发生上游错误时，HTTP 流直接结束；前端将“流提前结束且没有正常完成”作为可重试播放失败。服务端不得在 PCM body 中混入 JSON 错误。
+
+客户端断开时，后端必须取消火山引擎请求，避免孤儿合成任务。
+
+## 5. 设备开始流程：RESET
+
+### 5.1 RESET 的业务语义
+
+按住板载 RESET 表示一次新的 `box_closed` 物理操作。T5 为每次真实按压生成新的 `eventId`：
+
+```http
+POST /api/v1/device/events
+Content-Type: application/json
+
+{
+  "eventId":"3db25df5-5f70-48f4-97d7-e823aa1b8bce",
+  "deviceId":"expo-device-001",
+  "userId":"expo-user-001",
+  "type":"box_closed",
+  "payload":{"source":"reset_button"}
+}
+```
+
+规则：
+
+- 同一 `eventId` 重试仍然幂等，不重复开始会话。
+- 在 `DEMO_CONTINUOUS_CONVERSATION=true` 且身份精确匹配时，新的 RESET `eventId` 创建新的 conversation run。
+- 新 run 不删除旧对话和旧晚安日记。
+- 普通生产设备的真实仓盖语义保持状态幂等，不因设备重启自动创建新 run。
+- 板载 RESET 不是数据库 reset；数据库测试重置是单独的服务器脚本。
+
+### 5.2 建立 Voice WebSocket
 
 ```text
-GET wss://bm.lg.gl/api/v1/device/voice?deviceId=<deviceId>&userId=<userId>
+GET /api/v1/device/voice?deviceId=<deviceId>&userId=<userId>
 ```
 
-MVP 延续 Demo User 身份模型；`userId` 和 `deviceId` 不是正式鉴权凭证。生产化正式鉴权不属于本次范围。
-
-连接规则：
-
-- 同一 `deviceId` 只允许一条活跃语音连接；新连接建立后关闭旧连接。
-- WebSocket 使用标准 ping/pong 保活，不额外定义业务心跳。
-- 所有业务控制事件使用 WebSocket text message，UTF-8 JSON 编码。
-- 所有 PCM 使用 WebSocket binary message。
-- 后端只允许一个写协程向 T5 连接写入消息，保证控制事件与音频帧顺序。
-- 连接建立后，后端立即发送 `session.ready`。
-
-连接就绪示例：
+连接建立后，后端先发送：
 
 ```json
 {
-  "type": "session.ready",
-  "phase": "LOCKED",
-  "completedTurns": 0,
-  "audio": {
-    "codec": "pcm",
-    "sampleRate": 24000,
-    "bitDepth": 16,
-    "channels": 1,
-    "frameMs": 20
-  }
+  "type":"session.ready",
+  "runId":"<runId>",
+  "phase":"LOCKED",
+  "completedTurns":0,
+  "audio":{"codec":"pcm","sampleRate":24000,"bitDepth":16,"channels":1,"frameMs":20,"frameBytes":960},
+  "recovery":{"runStatus":"active","resumeAction":"listen","guidanceStatus":"pending"},
+  "occurredAt":"2026-07-25T00:00:00Z"
 }
 ```
 
-`session.ready` 必须反映数据库中的持久 phase 和已完成轮数，而不是只反映当前进程内状态。音频采集、播放进度和开场白是否播放属于瞬时状态，不跨进程恢复；设备重连后可据此判断是否继续对话。
+`completedTurns` 是当前 run 已成功完成的用户/AI 往返次数，只用于恢复和诊断，不再有最大值 3。T5 收到 ready 后，后续所有 JSON 控制事件必须复用这里返回的 `runId`。
 
-## 5. T5 上行协议
-
-所有控制事件都包含：
-
-- `type`：事件类型。
-- `eventId`：T5 生成的 UUID，用于控制事件去重。
-- `turnId`：一次用户发言的 UUID；只在轮次相关事件中存在。
-
-### 5.1 启动今晚语音会话
-
-闭仓事件成功后，T5 建立语音连接并发送：
+T5 随后发送：
 
 ```json
-{
-  "type": "session.start",
-  "eventId": "3db25df5-5f70-48f4-97d7-e823aa1b8bce"
-}
+{"type":"session.start","runId":"<runId>","eventId":"95a777c5-2ceb-4aea-8802-b7ec6b33d7dd"}
 ```
 
-后端仅在 `LOCKED` 或可恢复的 `CONVERSATION` 接受该事件。当前 WebSocket 连接第一次从 `LOCKED` 启动时，后端切换到 `CONVERSATION` 并播放开场白；若数据库已有至少一轮对话，重连时不再播放开场白。若进程在第一轮前重启，由于本次不新增持久字段，短开场白可能重播一次，T5 可通过长按立即打断。
+后端进入 `CONVERSATION` 并播放固定开场白：
 
-### 5.2 长按开始说话
+> 手机已经放好了。今晚想和眠眠聊聊什么？
 
-```json
-{
-  "type": "input.start",
-  "eventId": "ff4af57c-64ef-4e29-a6ed-a5f0bf445247",
-  "turnId": "8ea4105c-bc68-46de-b625-c49281c6688f"
-}
-```
-
-后端接受后返回：
-
-```json
-{
-  "type": "input.accepted",
-  "turnId": "8ea4105c-bc68-46de-b625-c49281c6688f"
-}
-```
-
-随后 T5 每 20 ms 发送一条 960-byte binary message。
-
-如果 TTS 正在播放，T5 必须先本地停止播放并清空缓冲，再发送 `playback.stop` 和 `input.start`，实现用户打断。
-
-### 5.3 松开结束说话
-
-```json
-{
-  "type": "input.end",
-  "eventId": "53bd7e56-2858-499e-a04d-2182ba299178",
-  "turnId": "8ea4105c-bc68-46de-b625-c49281c6688f"
-}
-```
-
-后端向火山引擎提交本轮音频并等待最终转写。最终转写事件仅用于联调，正式 T5 固件可以忽略其文字：
-
-```json
-{
-  "type": "transcript.final",
-  "turnId": "8ea4105c-bc68-46de-b625-c49281c6688f",
-  "text": "今天工作有点累"
-}
-```
-
-ASR 完成、Claude 生成期间发送：
-
-```json
-{
-  "type": "thinking",
-  "turnId": "8ea4105c-bc68-46de-b625-c49281c6688f"
-}
-```
-
-T5 可以播放一次很短的本地提示音，不得循环播放长提示音。
-
-### 5.4 短按静音或停止播放
-
-```json
-{
-  "type": "playback.stop",
-  "eventId": "b8391c5d-7746-4705-bb74-4e145749513e"
-}
-```
-
-短按发生时，T5 必须立即停止播放器并清空本地播放缓冲，不等待后端确认。后端收到事件后取消当前 TTS 或引导播放。
-
-## 6. 后端下行协议
-
-### 6.1 开始播放
-
-```json
-{
-  "type": "playback.start",
-  "playbackId": "ca7d3ee8-d79c-4df0-b4e3-ceee2c156ceb",
-  "kind": "reply",
-  "turn": 1,
-  "turnId": "8ea4105c-bc68-46de-b625-c49281c6688f",
-  "text": "辛苦了，今晚先不用急着把所有事情解决。"
-}
-```
-
-字段：
-
-- `kind`：`opening`、`reply` 或 `guidance`。
-- `turn`：`reply` 时为 1–3；其他类型可省略。
-- `turnId`：`reply` 时为对应用户发言 ID；其他类型可省略。
-- `text`：供联调和可访问性使用，固件可忽略。
-
-`playback.start` 后紧跟连续 binary PCM message。T5 应边收边播。
-
-### 6.2 播放结束
-
-```json
-{
-  "type": "playback.end",
-  "playbackId": "ca7d3ee8-d79c-4df0-b4e3-ceee2c156ceb",
-  "reason": "completed"
-}
-```
-
-`reason` 可为：
-
-- `completed`：正常播放完毕。
-- `interrupted`：用户说话或短按打断。
-- `upstream_error`：TTS 上游失败。
-
-### 6.3 要求设备停止播放
-
-```json
-{
-  "type": "playback.stop",
-  "playbackId": "ca7d3ee8-d79c-4df0-b4e3-ceee2c156ceb",
-  "reason": "user_interrupt"
-}
-```
-
-T5 收到后立即停止播放器并清空缓冲。
-
-### 6.4 对话完成
-
-```json
-{
-  "type": "conversation.completed",
-  "completedTurns": 3,
-  "journalId": "6d1e52fc-46ec-447c-89c6-21a021fb1fb9",
-  "guidance": "breathing_46"
-}
-```
-
-该事件表示第三次有效用户发言已经完成 Claude 回复和晚安日记持久化。后端随后自动进入引导流程。
-
-### 6.5 引导播放
-
-对于 T5 内置白噪音：
-
-```json
-{
-  "type": "guidance.start",
-  "guidance": "rain",
-  "source": "device",
-  "durationMinutes": 20
-}
-```
-
-`rain` 和 `brown_noise` 由 T5 固件内置并循环播放，播放时长来自 Profile。T5 不通过语音 WebSocket下载完整白噪音文件。
-
-对于呼吸引导：
-
-```json
-{
-  "type": "playback.start",
-  "playbackId": "17fb2836-d46d-485a-890d-0fc20359a7fa",
-  "kind": "guidance",
-  "text": "跟着眠眠，慢慢吸气……"
-}
-```
-
-`breathing_46` 使用固定脚本，经火山引擎 TTS 生成并以 PCM 流式播放。`silence` 不产生音频。
-
-### 6.6 错误事件
-
-```json
-{
-  "type": "error",
-  "code": "asr_unavailable",
-  "message": "语音识别暂时不可用，请重新说一次",
-  "retryable": true,
-  "turnId": "8ea4105c-bc68-46de-b625-c49281c6688f"
-}
-```
-
-稳定错误码：
-
-| code | retryable | 含义 |
-|---|---:|---|
-| `speech_not_configured` | false | 后端未配置火山引擎 ASR App ID、ASR Access Token 或 TTS API Key |
-| `invalid_phase` | false | 当前状态不允许开始或继续对话 |
-| `invalid_event` | false | JSON 控制事件无效或顺序错误 |
-| `invalid_audio_frame` | true | PCM 帧不是 960 bytes |
-| `turn_in_progress` | true | 当前已有一轮正在处理 |
-| `turn_too_long` | true | 单次长按超过 60 秒 |
-| `conversation_limit` | false | 已完成 3 轮 |
-| `asr_unavailable` | true | 火山引擎 ASR 暂时不可用 |
-| `empty_transcript` | true | 未识别出有效文字 |
-| `ai_unavailable` | true | Claude 和本地 fallback 均失败 |
-| `tts_unavailable` | true | 火山引擎 TTS 重试后仍失败 |
-| `device_too_slow` | true | T5 消费音频过慢导致有界队列满 |
-
-错误事件不得包含火山引擎 Token、Claude Token、上游完整响应或完整音频内容。
-
-## 7. 三轮业务流程
-
-### 7.1 开场
-
-`session.start` 首次成功后：
-
-1. 后端进入 `CONVERSATION`。
-2. 后端并行预连接火山引擎 ASR 和 TTS，降低第一次交互延迟。
-3. 后端通过火山引擎 TTS 播放一条短、固定、可配置的温柔开场白。
-4. 开场白不计入三轮，不调用 Claude。
-
-开场白必须短且明确邀请用户说话，避免用户不知道何时可以长按。
-
-### 7.2 用户轮次
-
-每次 `input.start` 到 `input.end` 构成一次候选用户发言。只有 ASR 得到非空最终文本且 `ConversationService.Turn` 成功持久化后，才算一轮有效发言。
-
-后端调用现有 ConversationService 时：
+下行顺序：
 
 ```text
-inputMode = voice
-clientRequestId = turnId
-text = final transcript
+playback.start(kind=opening)
+→ binary PCM × N
+→ playback.end(reason=completed)
 ```
 
-`turnId` 复用已有 `clientRequestId` 幂等能力。设备重连或控制消息重试不会重复调用 Claude，也不会重复增加轮数。
+## 6. 自动录音和 VAD
 
-### 7.3 Claude 回复
+收到 `opening` 或 `reply` 的 `playback.end(reason=completed)` 后，T5 自动开始下一轮，不等待按键：
 
-Claude 保持现有 structured output，一次返回：
-
-- 适合朗读的回复文字。
-- 情绪、担忧、明日待办和安慰语。
-- 建议引导类型。
-- 是否建议结束。
-
-VoiceSessionService 负责严格执行 3 轮产品规则：前两轮继续对话，第 3 轮强制完成。`ConversationService` 继续负责数据库事务、fallback、晚安卡和 Android WebSocket 广播。
-
-### 7.4 第三轮完成
-
-第三轮 Claude 回复和晚安日记写入数据库后：
-
-1. 将回复经火山引擎 TTS 流式播放给 T5。
-2. 回复播放完成后发送 `conversation.completed`。
-3. 通过现有 Tonight 领域服务执行 `select_guidance`，自动采用 Claude 的 `suggestedGuidance`，从 `CHOOSING_GUIDANCE` 进入 `SLEEPING` 并持久化选择。
-4. `rain` / `brown_noise` 由 T5 播放内置资源。
-5. `breathing_46` 由后端通过火山引擎 TTS 流式播放固定脚本。
-6. `silence` 不产生音频。
-7. Android 收到持久化后的 `SLEEPING` 状态。
-
-Android 通过现有 `journal.created` 和 `tonight.updated` 接收晚安日记与状态更新。
-
-## 8. 火山引擎 V3 桥接
-
-### 8.1 流式 ASR
-
-```text
-wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
-resource ID: volc.bigasr.sauc.duration
-```
-
-握手 headers：`X-Api-App-Key`、`X-Api-Access-Key`、`X-Api-Resource-Id`、每次连接新生成的 `X-Api-Request-Id`。App ID 和 Access Token 仅保存在后端；Secret Key 不用于该 WebSocket API。
-
-建连后先发送 V3 binary full client request：4-byte protocol header、正 sequence `1`、payload size、gzip JSON。JSON 声明 `pcm/raw/24000/mono`、`model_name=bigmodel`、`enable_itn=true`、`enable_punc=true`、`enable_ddc=false`。
-
-T5 仍每 20 ms 上行 960 bytes。火山引擎建议每个上游音频包 100–200 ms，因此后端聚合 10 个 T5 帧为 9600 bytes（约 200 ms），gzip 后以 audio-only binary request 发送。`input.end` 时冲刷不足 200 ms 的余量并设置 last-package flag。独立读协程持续接收增量结果，最终使用最后一份完整非空 transcript。
-
-### 8.2 单向流式 TTS
-
-```text
-wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream
-resource ID: seed-tts-2.0
-```
-
-握手 headers：`X-Api-Key`、`X-Api-Resource-Id`、每次请求新生成的 `X-Api-Connect-Id`。建连后发送一次 no-sequence `FullClientRequest`，JSON payload 的 `req_params` 固定包含：
+1. 生成新的 `turnId` 和 `eventId`。
+2. 发送 `input.start`。
+3. 等待 `input.accepted`。
+4. 实时发送 960-byte PCM。
+5. 本地 VAD 判断说话结束后发送 `input.end`。
 
 ```json
 {
-  "speaker": "zh_female_gaolengyujie_uranus_bigtts",
-  "text": "待合成文本",
-  "audio_params": {"format": "pcm", "sample_rate": 24000}
+  "type":"input.start",
+  "runId":"<runId>",
+  "eventId":"ff4af57c-64ef-4e29-a6ed-a5f0bf445247",
+  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"
 }
 ```
 
-服务端连续返回 `AudioOnlyServer` 原始 PCM，并以 `SessionFinished(152)` 表示成功结束；不使用双向 TTS 的 connection/session/task 请求事件。
-
-`speaker` 可通过环境变量覆盖，但必须已对当前应用开通。服务端 audio-only response 是原始 PCM，不使用 Base64；后端收到后立即转交 `VoiceSessionService`，再切分成 960-byte T5 帧。播放中断时取消 context 并关闭当前火山引擎 WebSocket，T5 同时清空本地播放缓冲。
-
-## 9. 服务端组件边界
-
-### `speech.VolcASRClient`
-
-职责：
-
-- 建立和关闭火山引擎 V3 ASR WebSocket。
-- 发送 gzip JSON 初始化请求。
-- 将 20 ms T5 PCM 聚合为约 200 ms 的 gzip binary 音频包。
-- 持续读取增量结果，在末包后返回最终文本。
-- 将火山引擎错误转换为稳定内部错误，不泄露凭证。
-
-不负责状态机、轮数、Claude 或数据库。
-
-### `speech.VolcTTSClient`
-
-职责：
-
-- 建立和关闭火山引擎 V3 单向流式 TTS WebSocket。
-- 发送一次 full client request，设置 speaker、文本和 PCM 24 kHz。
-- 提交文字并返回原始 PCM 流。
-- 支持 context cancellation 和一次自动重试。
-
-不负责选择回复内容、引导类型或设备状态。
-
-### `service.VoiceSessionService`
-
-职责：
-
-- 管理一个 T5 连接内的瞬时语音状态。
-- 校验控制事件和 PCM 帧顺序。
-- 协调 ASR → ConversationService → TTS。
-- 自动开场、三轮结束和引导播放。
-- 将 `turnId` 映射到 `clientRequestId`。
-- 处理中断、重连和有界队列背压。
-
-不复制 ConversationService 的 Claude、幂等、持久化和晚安卡规则。
-
-### `controller.DeviceVoiceController`
-
-职责：
-
-- 校验配置和必要 query 参数。
-- 完成 WebSocket upgrade。
-- 启动读泵和唯一写泵。
-- 设置 read limit、deadline、ping/pong 和 close code。
-- 将消息交给 VoiceSessionService。
-
-不包含业务规则或火山引擎协议细节。
-
-## 10. 状态机和现有接口兼容
-
-- 不新增数据库 migration。
-- 不新增“录音中”或“播放中”持久 phase；这些是 VoiceSession 的瞬时子状态。
-- `session.start` 必须通过共享的 Tonight 领域方法复用现有 `StartConversation`，从 `LOCKED` 进入 `CONVERSATION`，不得在 VoiceSessionService 直接修改数据库 phase。
-- 第三轮继续通过现有 Conversation finalize 逻辑进入 `CHOOSING_GUIDANCE`，随后通过共享的 Tonight `select_guidance` 领域方法自动进入 `SLEEPING`；该领域方法负责状态持久化和 Android 广播，VoiceSessionService 只负责把相同引导实时发送给当前 T5 连接。
-- `POST /api/v1/conversations/turn` 保留为 Debug 文本入口。
-- `GET /api/v1/ws` 保留为 Android 状态 WebSocket。
-- `POST /api/v1/device/events` 继续处理闭仓、开仓、短按、晨光等持久设备事件。
-- `soft_button/long_press` 的语音开始和结束不再通过 REST 事件表达；语音连接内使用 `input.start` / `input.end`。
-- `SUNRISE` 状态中的长按起床语义继续保留，硬件应按当前模式区分。
-- 一般离线设备控制、晨光和非实时命令继续使用现有 command lease 队列。
-
-## 11. 并发、背压和资源限制
-
-每条设备语音连接包含：
-
-- 一个 WebSocket 读循环。
-- 一个唯一写协程。
-- 一个有界下行消息队列。
-- 当前 `turnId` 和输入状态。
-- 当前 ASR/TTS cancel function。
-- 当前 `playbackId`。
-
-限制：
-
-- 同时只能处理一个 `turnId`。
-- 单次长按最长 60 秒，即最多 3000 个 PCM 帧和约 2.88 MB 原始音频；数据只流经内存，不整段保存。
-- 整晚倾诉继续受现有 4 分钟硬截止约束。
-- 服务端不为断线保存半段音频。
-- 下行有界队列满时，先取消当前播放并发送 `device_too_slow`；无法及时发送错误则以 WebSocket 1011 关闭。
-- 严重协议错误使用 WebSocket 1008；服务重启或临时故障使用 1011。
-
-## 12. 故障恢复
-
-| 场景 | 行为 |
-|---|---|
-| 未配置火山引擎 ASR App ID、ASR Access Token 或 TTS API Key | upgrade 前返回 HTTP 503，错误码 `speech_not_configured` |
-| `input.end` 前断线 | 丢弃当前音频，不创建 turn；重连后用户重新说 |
-| ASR 连接失败 | 清空本轮，返回可重试 `asr_unavailable` |
-| ASR 为空 | 返回 `empty_transcript`，不增加轮数 |
-| Claude 主调用失败 | 使用现有本地 fallback |
-| Claude 与 fallback 均失败 | 释放 processing lease，返回 `ai_unavailable` |
-| TTS 连接失败 | 对已经持久化的回复文字自动重试一次 |
-| TTS 重试仍失败 | 返回 `tts_unavailable`；晚安日记和文字记录保持有效 |
-| TTS 播放中用户打断 | T5 清空播放缓冲；后端取消并关闭当前 TTS 连接 |
-| 后端重启 | 不恢复半段音频；已完成 turn 由 `turnId` 幂等保护 |
-| 设备重连 | `session.ready` 返回持久 phase 和轮数；不重复已完成轮次 |
-
-## 13. Android 职责
-
-Android 正式流程只负责：
-
-- Profile、人格、作息、提醒和引导偏好设置。
-- Tonight phase 和已完成轮数展示。
-- T5 在线状态和固件能力展示。
-- WebSocket 重连后的状态刷新。
-- `journal.created` 后展示晚安日记。
-- 日记待办完成/取消和单卡删除。
-
-Android 不负责：
-
-- `SpeechRecognizer`。
-- `TextToSpeech`。
-- 音频上传。
-- 回复朗读和 TTS 去重。
-- 语音轮次计时。
-
-Debug 构建可以保留文字输入页，调用现有 `/conversations/turn`，但不得作为正式产品主路径。
-
-## 14. T5 固件职责
-
-T5 必须实现：
-
-- Device Voice WebSocket 建连、ping/pong 和指数退避重连。
-- 24kHz/16-bit/mono PCM 采集和播放。
-- 20 ms、960-byte 固定音频帧。
-- 长按开始、松开结束的 push-to-talk。
-- 短按本地立即静音并上报 `playback.stop`。
-- 播放中长按的本地打断。
-- 100–300 ms 有界播放环形缓冲和边收边播。
-- `eventId`、`turnId` 和 `playbackId` 处理。
-- 内置 `rain` 和 `brown_noise` 循环资源。
-- `guidance.start` 的时长控制。
-- 根据 Sunrise 与 Conversation 模式区分长按语义。
-
-T5 不需要实现：
-
-- 火山引擎协议或 Base64 音频事件。
-- Claude 协议。
-- 完整录音缓存。
-- 晚安日记解析。
-
-## 15. 配置
-
-后端新增配置：
-
-```env
-VOLCENGINE_SPEECH_APP_ID=
-VOLCENGINE_SPEECH_ACCESS_TOKEN=
-VOLCENGINE_TTS_API_KEY=
-VOLCENGINE_ASR_WS_URL=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
-VOLCENGINE_ASR_RESOURCE_ID=volc.bigasr.sauc.duration
-VOLCENGINE_TTS_WS_URL=wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream
-VOLCENGINE_TTS_RESOURCE_ID=seed-tts-2.0
-VOLCENGINE_TTS_SPEAKER=zh_female_gaolengyujie_uranus_bigtts
-VOLCENGINE_ASR_TIMEOUT=20s
-VOLCENGINE_TTS_FIRST_FRAME_TIMEOUT=10s
-VOLCENGINE_TTS_TOTAL_TIMEOUT=45s
-VOICE_MAX_UTTERANCE_DURATION=60s
-VOICE_OPENING_TEXT=手机已经安放好了。今晚有什么想和眠眠说的吗？
-VOICE_BREATHING_SCRIPT=跟着眠眠，慢慢吸气四秒，再轻轻呼气六秒。
+```json
+{
+  "type":"input.end",
+  "runId":"<runId>",
+  "eventId":"53bd7e56-2858-499e-a04d-2182ba299178",
+  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f"
+}
 ```
 
-`.env.example` 只保留空 ASR App ID、空 ASR Access Token 和空 TTS API Key；真实凭证只进入未提交的 `.env` 或秘密管理系统。日志只记录 request/connect ID、稳定错误码和耗时，不记录凭证、原始 PCM、转写或完整 TTS 文本。
+演示默认 VAD 参数：
 
-## 16. 简单测试范围
+- 本地监听最多等待 10 秒出现首段人声。
+- 检测到人声后，连续 2.5 秒静默视为本轮结束。
+- 单轮硬上限 60 秒。
+- 初始 10 秒没有人声时只重新进入本地监听，不发送 `input.start` 或 `input.end`，也不创建 turn。
+- 检测到首声后才发送 `input.start`；保留 300 ms（15 帧）pre-roll，并在等待 `input.accepted` 时继续采集最多 3 秒（150 帧）pending PCM。
+- accepted 后按 pre-roll → pending → live 顺序发送，允许短时 burst。
 
-按当前 MVP 要求执行以下测试，不进行 code review 或大规模压力测试：
+VAD 在 T5 本地完成。后端仍持续接收 PCM 并桥接 ASR，但不依赖 ASR 增量文本来决定何时停止采集。这样不会形成“必须先 `input.end` 才拿到 final、又必须拿到 final 才发送 `input.end`”的循环依赖。
 
-1. 配置解析：默认 URL/resource/speaker、空 ASR App ID/Access Token、空 TTS API Key 和 duration 校验。
-2. 协议测试：JSON 事件绑定、960-byte PCM 校验、乱序事件和 60 秒限制。
-3. 火山引擎 ASR mock WebSocket：鉴权 headers、gzip JSON 初始化、200 ms 聚合、末包、最终文本和错误转换。
-4. 火山引擎 TTS mock WebSocket：鉴权 headers、event/session 帧、speaker、原始 PCM 下发、中断和一次重试。
-5. VoiceSessionService：自动开场、有效轮次、空转写不计轮、`turnId` 幂等、三轮完成和引导选择。
-6. Device Voice WebSocket smoke：握手、`session.ready`、一轮 mock 音频、播放开始/音频/结束。
-7. `go test ./...`。
-8. `go build ./...`。
-9. OpenAPI YAML 解析。
+## 7. 连续 AI 对话
 
-真实火山引擎调用可以使用最小化 smoke 验证鉴权和协议；真实 T5 声音质量、首帧延迟和网络抖动仍需实机端到端联调。
+`input.end` 后，后端异步执行：
 
-## 17. 完整联调所需输入
+```text
+ASR final
+→ transcript.final
+→ thinking
+→ Claude
+→ 持久化 user/assistant turn
+→ playback.start(kind=reply)
+→ binary PCM × N
+→ playback.end(reason=completed)
+```
 
-跑通真实完整流程前需要：
+代表性服务端事件：
 
-- 已开通大模型流式 ASR 的火山引擎 App ID/Access Token，以及可用的单向流式 TTS API Key。
-- 当前应用可用的 TTS speaker；默认尝试 `zh_female_gaolengyujie_uranus_bigtts`。
-- T5 联调设备的 `deviceId`、固件版本和网络可达性。
-- T5 对 24kHz/16-bit/mono PCM 采集与播放的实测确认。
-- T5 每 20 ms 输出 960-byte 帧及 100–300 ms 播放缓冲的实测确认。
-- T5 内置 `rain`、`brown_noise` 资源及可控播放时长的实测确认。
-- 期望音色、语速、音量和情绪风格的试听反馈。
+```json
+{
+  "type":"transcript.final",
+  "runId":"<runId>",
+  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f",
+  "text":"今天工作有点累",
+  "occurredAt":"2026-07-25T00:00:00Z"
+}
+```
 
-真实 Token 不得写入文档、源码、Git commit 或公开日志。
+```json
+{
+  "type":"thinking",
+  "runId":"<runId>",
+  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f",
+  "occurredAt":"2026-07-25T00:00:00Z"
+}
+```
+
+```json
+{
+  "type":"playback.start",
+  "runId":"<runId>",
+  "playbackId":"17fb2836-d46d-485a-890d-0fc20359a7fa",
+  "kind":"reply",
+  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f",
+  "audio":{"codec":"pcm","sampleRate":24000,"bitDepth":16,"channels":1,"frameMs":20,"frameBytes":960},
+  "occurredAt":"2026-07-25T00:00:00Z"
+}
+```
+
+```json
+{
+  "type":"playback.end",
+  "runId":"<runId>",
+  "playbackId":"17fb2836-d46d-485a-890d-0fc20359a7fa",
+  "turnId":"8ea4105c-bc68-46de-b625-c49281c6688f",
+  "reason":"completed",
+  "occurredAt":"2026-07-25T00:00:00Z"
+}
+```
+
+只有非空转写且 assistant 回复成功持久化，才增加 `completedTurns`。
+
+演示 run 规则：
+
+- 不限制三轮。
+- 不在第三轮自动生成晚安日记。
+- 不发送 `conversation_limit`。
+- 不因达到原 4 分钟 hard deadline 自动结束。
+- 每次回复播放完毕后，T5 自动返回第 6 节开始下一轮录音。
+- 同一时刻最多处理一个 `turnId`。
+- `turnId` 复用为 `clientRequestId`，重试不重复增加轮次。
+
+Claude 每轮仍可输出结构化的 `emotion`、`worry`、`tomorrowTask` 和 `comfort` 作为中间草稿，但这些字段只在 KEY 结束时统一总结后写入最终晚安日记。
+
+## 8. KEY 结束和睡眠引导
+
+### 8.1 上行结束事件
+
+按住板载 KEY 时，T5 立即停止当前录音或播放、清空缓冲，并发送：
+
+```json
+{
+  "type":"conversation.finish",
+  "runId":"<runId>",
+  "eventId":"b8391c5d-7746-4705-bb74-4e145749513e"
+}
+```
+
+`conversation.finish` 是当前 Voice WebSocket 内的控制事件。它不是 `input.end`，也不是晨光阶段的 `soft_button/long_press`。
+
+后端收到后：
+
+1. 取消尚未完成的 ASR、Claude 或 reply TTS；未完整持久化的半轮不写入总结。
+2. 对当前 run 中所有已完成的用户和 assistant turn 做一次最终总结。
+3. 追加一篇新的 MemoryCard。
+4. 广播 `journal.created`。
+5. 发送 `conversation.completed`。
+6. 流式播放睡眠引导。
+
+同一 `eventId` 重试必须返回同一个完成结果，不得追加第二篇日记。
+
+### 8.2 完成事件
+
+```json
+{
+  "type":"conversation.completed",
+  "runId":"<runId>",
+  "eventId":"b8391c5d-7746-4705-bb74-4e145749513e",
+  "completedTurns":6,
+  "journalId":"6d1e52fc-46ec-447c-89c6-21a021fb1fb9",
+  "guidance":"rain",
+  "occurredAt":"2026-07-25T00:00:00Z"
+}
+```
+
+`completedTurns` 可以是任意非负整数。
+
+### 8.3 临时睡眠音频
+
+演示阶段允许使用两个服务器本地素材：
+
+| guidance | 临时源文件 | 下发方式 |
+|---|---|---|
+| `rain` | `~/tmp/rainy.wav` | 后端解码/重采样后经 Voice WebSocket 流式发送 PCM |
+| `breathing_46` | `~/tmp/miao.mp3` | 后端解码/重采样后经 Voice WebSocket 流式发送 PCM |
+
+源文件无论原编码和采样率如何，下发 T5 前都必须统一转换为 PCM s16le、24000 Hz、mono，并切成 960-byte 帧。部署时通过配置指定实际绝对路径；`~` 只表示当前开发机素材位置，不写死在业务源码中。
+
+播放顺序：
+
+```json
+{
+  "type":"playback.start",
+  "runId":"<runId>",
+  "playbackId":"61c83ae0-657c-483a-a246-63810327ece0",
+  "kind":"guidance",
+  "guidance":"rain",
+  "audio":{"codec":"pcm","sampleRate":24000,"bitDepth":16,"channels":1,"frameMs":20,"frameBytes":960},
+  "occurredAt":"2026-07-25T00:00:00Z"
+}
+```
+
+```text
+binary PCM × N
+```
+
+```json
+{
+  "type":"playback.end",
+  "runId":"<runId>",
+  "playbackId":"61c83ae0-657c-483a-a246-63810327ece0",
+  "reason":"completed",
+  "occurredAt":"2026-07-25T00:00:00Z"
+}
+```
+
+睡眠引导播放结束后，T5 结束本次工作，不再自动开始录音。
+
+## 9. 晚安日记 append 语义
+
+KEY 是唯一的正常日记生成时机。最终总结输入为当前 run 中所有已经完整持久化的用户和 assistant turn。
+
+每次 KEY 成功结束一个 run，后端都创建新的 MemoryCard：
+
+- 新 UUID。
+- 关联独立 conversation run。
+- `date` 使用用户 Profile 时区的当天日期。
+- 同一用户、同一天允许存在多篇日记。
+- 不按 `userId + date` 或仅按 `sessionId` 覆盖历史日记。
+- 列表按 `date DESC, createdAt DESC` 返回，因此同一天更新创建的日记排在前面。
+
+继续使用现有接口：
+
+```http
+GET /api/v1/journals?limit=7
+GET /api/v1/journals/{id}
+```
+
+不新增 `GET /journals/tonight`。前端需要全部记录时增大 `limit`，上限仍为 30。
+
+为支持同日多 run，持久化层需要让“conversation run”和“日历日期”解耦：每次 RESET 创建新的 run；MemoryCard 对 run 保持一对一，但同一 `userId + date` 不再唯一。
+
+## 10. 数据库测试 reset 和三篇种子日记
+
+服务器测试 reset 与板载 RESET 完全不同。执行测试数据库 reset 时：
+
+1. 清理指定 Demo User/Device 的活动 run、测试日记和未完成命令。
+2. 创建一个新的可开始 run。
+3. 写入相对演示当天 `D-3`、`D-2`、`D-1` 的三篇固定日记。
+
+固定文案：
+
+| 日期 | emotion | worry | tomorrowTask | comfort | guidance |
+|---|---|---|---|---|---|
+| D-3 | 轻松 | 今天完成了几件一直惦记的小事，心里松了一些。 | 明早列出最重要的一件事 | 你已经做得很好，今晚可以放心休息。 | rain |
+| D-2 | 疲惫 | 工作还有一些没有收尾，担心明天会来不及。 | 明早先处理最紧急的十分钟 | 剩下的事情交给明天，现在先把自己照顾好。 | breathing_46 |
+| D-1 | 平静 | 明天有新的安排，期待里也带着一点紧张。 | 起床后确认今天的第一个安排 | 不需要一次准备好所有答案，慢慢来就可以。 | rain |
+
+种子记录必须有固定、可重复计算的幂等标识；重复执行 reset 后仍然只有这三篇种子，不重复追加。硬件演示通过 KEY 产生的日记则始终 append。
+
+## 11. 连接、顺序和故障
+
+- 同一 `deviceId` 只允许一个活跃 Voice WebSocket，新连接替换旧连接并以 close code `1008` 终止旧循环。
+- 收到 `1008` 时 T5 停止自动循环；收到 `1011` 或遇到网络错误时退避重连。
+- 所有 WebSocket 写操作经过唯一 writer，保持 `playback.start → PCM → playback.end` FIFO；每个 start 由 `playback.end`、结构化 playback error 或 WebSocket close 唯一终结。
+- `input.end` 后 ASR final 默认 8 秒内成功或返回 `asr_unavailable`。
+- `empty_transcript` 不创建 turn，T5 自动重新监听。
+- reply TTS 失败返回 `tts_unavailable`，T5 可重新等待或由用户按 KEY 结束。
+- KEY 总结失败时返回可重试错误且不播放睡眠引导；相同 finish `eventId` 可安全重试。
+- KEY 日记已写入但连接在引导期间断开时，日记仍有效；重连不得重复 append。
+- 连接关闭时，T5 立即停止采集和播放并清空本地缓冲。
+
+## 12. 实现与验收边界
+
+后端源码已实现：前端文本流式 TTS、conversation run、不限轮、`conversation.finish`、同日 append 日记、三篇 reset 种子、WAV/MP3 流式转换以及结构化断线恢复。
+
+仍需在部署环境完成：
+
+- 在 PostgreSQL 备份或测试库验证 migration 004 的 up/down；生产升级只执行 up。
+- 用真实火山引擎凭证验证 ASR/TTS 首帧、超时和错误码。
+- 用真实 T5 固件验收 10 秒无首声、300 ms pre-roll、3 秒 pending burst、2.5 秒尾静默和 60 秒上限。
+- 自动录音和本地 VAD 属于 T5 固件工作，本仓库不包含固件源码。

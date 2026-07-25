@@ -53,26 +53,46 @@ type NightSession struct {
 }
 
 func ValidateNightSessionConversationState(session *NightSession) error {
-	valid := false
-	switch session.Phase {
-	case "LOCKED":
-		valid = session.ConversationTurns == 0
-	case "CONVERSATION":
-		valid = session.ConversationTurns >= 0 && session.ConversationTurns < 3
-	case "CHOOSING_GUIDANCE", "SLEEPING":
-		valid = session.ConversationTurns == 3
-	default:
-		return nil
-	}
-	if !valid {
+	if session.ConversationTurns < 0 {
 		return fmt.Errorf("inconsistent night session state: phase=%s conversationTurns=%d", session.Phase, session.ConversationTurns)
 	}
 	return nil
 }
 
+const (
+	ConversationRunActive    = "active"
+	ConversationRunFinishing = "finishing"
+	ConversationRunCompleted = "completed"
+	ConversationRunAborted   = "aborted"
+
+	GuidancePending     = "pending"
+	GuidancePlaying     = "playing"
+	GuidanceInterrupted = "interrupted"
+	GuidanceCompleted   = "completed"
+)
+
+type ConversationRun struct {
+	ID               uuid.UUID `gorm:"type:uuid;primaryKey"`
+	UserID           string    `gorm:"index;not null"`
+	DeviceID         string    `gorm:"index;not null"`
+	NightSessionID   uuid.UUID `gorm:"type:uuid;index;not null"`
+	Date             time.Time `gorm:"type:date;index;not null"`
+	Status           string    `gorm:"index;not null"`
+	CompletedTurns   int       `gorm:"not null;default:0"`
+	ProcessingTurnID *string
+	FinishEventID    *string
+	Guidance         string `gorm:"not null;default:''"`
+	GuidanceStatus   string `gorm:"not null;default:'pending'"`
+	StartedAt        time.Time
+	FinishedAt       *time.Time
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
 type ConversationTurn struct {
 	ID              uuid.UUID      `gorm:"type:uuid;primaryKey"`
 	SessionID       uuid.UUID      `gorm:"type:uuid;index;not null"`
+	RunID           uuid.UUID      `gorm:"type:uuid;index;not null"`
 	Role            string         `gorm:"not null"`
 	Text            string         `gorm:"type:text;not null"`
 	TurnIndex       int            `gorm:"not null"`
@@ -85,7 +105,8 @@ type ConversationTurn struct {
 
 type MemoryCard struct {
 	ID                      uuid.UUID `gorm:"type:uuid;primaryKey"`
-	SessionID               uuid.UUID `gorm:"type:uuid;uniqueIndex;not null"`
+	SessionID               uuid.UUID `gorm:"type:uuid;index;not null"`
+	RunID                   uuid.UUID `gorm:"type:uuid;uniqueIndex;not null"`
 	UserID                  string    `gorm:"index;not null"`
 	Date                    time.Time `gorm:"type:date;index;not null"`
 	Emotion                 string    `gorm:"not null"`

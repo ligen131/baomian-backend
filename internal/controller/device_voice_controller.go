@@ -159,9 +159,26 @@ type voiceOutboundMessage struct {
 
 type websocketVoiceOutput struct {
 	messages chan<- voiceOutboundMessage
+	mu       sync.Mutex
+	runID    string
 }
 
 func (o *websocketVoiceOutput) SendEvent(ctx context.Context, event voice.ServerEvent) error {
+	o.mu.Lock()
+	if event.RunID != "" {
+		o.runID = event.RunID
+	} else if event.Type == voice.EventError {
+		event.RunID = o.runID
+	}
+	o.mu.Unlock()
+	if event.Type == voice.EventError {
+		if event.TerminalFor == "" {
+			event.TerminalFor = "event"
+		}
+		if event.OccurredAt == "" {
+			event.OccurredAt = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+	}
 	return o.enqueue(ctx, voiceOutboundMessage{messageType: websocket.TextMessage, payload: event})
 }
 
