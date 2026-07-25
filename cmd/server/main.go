@@ -59,6 +59,9 @@ func main() {
 		store, adapter, hub,
 		cfg.ConversationSilenceTimeout, cfg.ConversationMaxDuration, cfg.AITimeout+time.Second, logger,
 	)
+	conversationService.ConfigureDemoContinuousConversation(
+		cfg.DemoContinuousConversation, cfg.DemoUserID, cfg.DefaultDeviceID,
+	)
 	deviceService := service.NewDeviceService(
 		store, hub, cfg.DemoUserID, cfg.DeviceCommandLease, cfg.DeviceCommandMaxAttempts,
 		cfg.ConversationSilenceTimeout, cfg.ConversationMaxDuration, cfg.PhoneRemovedResumeWindow, logger,

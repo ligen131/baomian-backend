@@ -22,6 +22,9 @@ type Store interface {
 	GetLatestUserTurn(ctx context.Context, sessionID uuid.UUID) (*model.ConversationTurn, error)
 	GetConversationTurnByClientRequestID(ctx context.Context, sessionID uuid.UUID, clientRequestID, role string) (*model.ConversationTurn, error)
 	DeleteConversationTurns(ctx context.Context, sessionID uuid.UUID) error
+	GetMemoryCardBySession(ctx context.Context, sessionID uuid.UUID) (*model.MemoryCard, error)
+	DeleteMemoryCardBySession(ctx context.Context, sessionID uuid.UUID) error
+	DeleteOpenDeviceCommands(ctx context.Context, userID, deviceID string) error
 	UpsertMemoryCard(ctx context.Context, card *model.MemoryCard) error
 	ListMemoryCards(ctx context.Context, userID string, limit int) ([]model.MemoryCard, error)
 	GetMemoryCard(ctx context.Context, userID string, cardID uuid.UUID, forUpdate bool) (*model.MemoryCard, error)

@@ -160,6 +160,33 @@ func (s *Store) DeleteConversationTurns(ctx context.Context, sessionID uuid.UUID
 	return nil
 }
 
+func (s *Store) GetMemoryCardBySession(ctx context.Context, sessionID uuid.UUID) (*model.MemoryCard, error) {
+	var card model.MemoryCard
+	if err := s.db.WithContext(ctx).Where("session_id = ?", sessionID).First(&card).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, repository.ErrNotFound
+		}
+		return nil, fmt.Errorf("get memory card by session: %w", err)
+	}
+	return &card, nil
+}
+
+func (s *Store) DeleteMemoryCardBySession(ctx context.Context, sessionID uuid.UUID) error {
+	if err := s.db.WithContext(ctx).Where("session_id = ?", sessionID).Delete(&model.MemoryCard{}).Error; err != nil {
+		return fmt.Errorf("delete memory card by session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteOpenDeviceCommands(ctx context.Context, userID, deviceID string) error {
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ? AND device_id = ? AND status IN ?", userID, deviceID, []string{"pending", "dispatched"}).
+		Delete(&model.DeviceCommand{}).Error; err != nil {
+		return fmt.Errorf("delete open device commands: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) UpsertMemoryCard(ctx context.Context, card *model.MemoryCard) error {
 	if card.ID == uuid.Nil {
 		card.ID = uuid.New()

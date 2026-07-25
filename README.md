@@ -53,6 +53,7 @@ cp .env.example .env
 | `DATABASE_URL` | 本地 baomian PostgreSQL | PostgreSQL DSN |
 | `DEMO_USER_ID` | `expo-user-001` | 默认演示用户 |
 | `DEFAULT_DEVICE_ID` | `expo-device-001` | APP action 对应的默认设备 |
+| `DEMO_CONTINUOUS_CONVERSATION` | `false` | 仅对上述固定演示用户和设备生效；Voice 建连时将已过期/已完成会话轮转为 `LOCKED + 0` |
 | `AI_PROVIDER` | `anthropic` | AI 协议：`anthropic` 或 `openai_compatible` |
 | `ANTHROPIC_API_KEY` | 空 | API Key；与 Auth Token 均为空时自动走本地 fallback |
 | `ANTHROPIC_AUTH_TOKEN` | 空 | Bearer Auth Token；与 API Key 同时设置时优先使用此项 |
@@ -251,6 +252,8 @@ ws://localhost:8080/api/v1/device/voice?deviceId=expo-device-001&userId=expo-use
 ```
 
 控制消息是 JSON text message；音频是 PCM signed 16-bit little-endian、24000 Hz、mono、20 ms、960-byte binary message。后端将 10 个 T5 帧聚合成约 200 ms 后发送给火山引擎 ASR；火山引擎 TTS 返回的 24 kHz PCM 会重新切成 960-byte 帧下发 T5。Claude 仍由现有 `ConversationService` 调用。`VoiceSessionService` 是确定性的 Go 协调器，不是 AI Agent。完整协议见 [`docs/hardware-integration.md`](docs/hardware-integration.md) 和 [`docs/voice-streaming-design.md`](docs/voice-streaming-design.md)。
+
+生产模式下，设备启动只上报 heartbeat；`box_closed` 只表示真实闭仓或恢复，绝不表示 reset。固定演示环境可显式开启 `DEMO_CONTINUOUS_CONVERSATION=true`：只有 `DEMO_USER_ID + DEFAULT_DEVICE_ID` 精确匹配时，Voice WebSocket 建连会把已过期或已完成的旧演示会话原子轮转为 `LOCKED + 0`。每个逻辑会话仍严格三轮；完成三轮后如需继续演示，应重新连接 Voice WebSocket，而不是发送第四轮。
 
 ## 设备网关
 

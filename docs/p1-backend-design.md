@@ -80,6 +80,8 @@ T5 PCM
 
 后端不增加音频数据库字段或 migration。断线发生在 `input.end` 前时丢弃半段音频；已持久化 turn 由 `turnId` 防重复。
 
+生产模式下，设备重启只更新 heartbeat，`box_closed` 仍只表示真实闭仓/恢复，不承担 reset。固定演示服务器可显式开启 `DEMO_CONTINUOUS_CONVERSATION`：只有配置的 Demo User 与默认设备同时匹配时，Voice WebSocket 在发送 `session.ready` 前原子轮转已超过硬截止且无活跃 lease 的未完成会话，或已经三轮完成的会话，首帧恢复为 `LOCKED + 0`。该模式默认关闭，不开放公网 reset API；每个逻辑会话仍严格三轮，继续演示需重新连接而不是发送第四轮。
+
 ## 4. 时间语义
 
 ### 4.1 今晚日期

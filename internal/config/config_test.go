@@ -6,6 +6,40 @@ import (
 	"time"
 )
 
+func TestLoadDemoContinuousConversation(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://example/app")
+
+	t.Run("disabled by default", func(t *testing.T) {
+		t.Setenv("DEMO_CONTINUOUS_CONVERSATION", "")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DemoContinuousConversation {
+			t.Fatal("demo continuous conversation must default to false")
+		}
+	})
+
+	t.Run("enabled explicitly", func(t *testing.T) {
+		t.Setenv("DEMO_CONTINUOUS_CONVERSATION", "true")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.DemoContinuousConversation {
+			t.Fatal("demo continuous conversation was not enabled")
+		}
+	})
+
+	t.Run("rejects invalid value", func(t *testing.T) {
+		t.Setenv("DEMO_CONTINUOUS_CONVERSATION", "yes")
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "DEMO_CONTINUOUS_CONVERSATION") {
+			t.Fatalf("Load() error = %v", err)
+		}
+	})
+}
+
 func TestLoadBuildsDatabaseURLFromFugueBinding(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("DB_HOST", "postgres.internal")

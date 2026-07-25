@@ -45,6 +45,8 @@ wss://bm.lg.gl/api/v1/device/voice?deviceId=<URL encoded deviceId>&userId=<URL e
 - 使用标准 WebSocket ping/pong。固件必须回复 ping，并在断线后指数退避重连。
 - 建议重连：`1s -> 2s -> 4s -> 8s -> 15s -> 15s...`。
 - 后端未配置火山引擎 ASR App ID、ASR Access Token 或 TTS API Key 时，upgrade 前返回 HTTP 503 `speech_not_configured`。
+- 生产设备启动只发送 heartbeat（未来可增加独立 `device.boot`）；不要把每次启动伪造成 `box_closed`，只有仓盖真实稳定关闭时才上报该事件。
+- 固定演示环境可开启 `DEMO_CONTINUOUS_CONVERSATION`。仅当 `userId/deviceId` 精确匹配后端配置时，Voice 建连会在首帧前把已过期或已完成的演示会话轮转为 `LOCKED + 0`；默认关闭且不影响生产恢复语义。
 
 | WebSocket message type | 内容 |
 |---|---|
@@ -218,7 +220,7 @@ Claude 回复开始：
 }
 ```
 
-随后自动开始引导。
+随后自动开始引导。同一逻辑会话到此结束，不能继续发送第四轮。演示连续模式下如需继续测试，应先断开并重新连接 Voice WebSocket；后端确认该固定演示身份的会话已经完成后，新的第一帧会是 `session.ready`、`LOCKED + 0`。
 
 ### 4.9 白噪音（T5 内置）
 
@@ -263,7 +265,8 @@ Claude 回复开始：
 
 - `input.end` 前断线：后端丢弃本轮；重连后使用新 `turnId` 重说。
 - `input.end` 后超时且结果不确定：重连后可复用相同 `turnId`；后端以 `clientRequestId` 防止重复增加轮数。
-- `session.ready.completedTurns` 和 `phase` 来自数据库。
+- `session.ready.completedTurns` 和 `phase` 来自数据库；生产模式重连恢复当前有效会话，不自动 reset。
+- 演示连续模式只会轮转已超过硬截止且没有活跃 processing lease 的 `CONVERSATION`，或已经三轮完成的 `CHOOSING_GUIDANCE/SLEEPING`；有效会话仍按原轮次恢复。
 - 后端重启不恢复半段 PCM；已经持久化的 turn 不重复调用 Claude。
 - 每个控制动作生成唯一 `eventId`；同一动作网络重试复用原 ID。
 
@@ -323,7 +326,7 @@ Content-Type: application/json
 - `SUNRISE` 中长按仍上报 REST `soft_button/long_press`。
 - 固件必须根据本地模式和 `session.ready.phase` 区分语义。
 - 仓盖去抖建议 300–500 ms；同一次物理事件重试复用 `eventId`，此时响应 `duplicate=true`。
-- 如果固件重启或丢失原 `eventId`，在后端已经记录闭仓的稳定阶段再次上报新 `box_closed`，后端也返回 200 和当前状态，但 `commands=[]` 且不会重复播放确认音；真正需要恢复状态时仍执行正常迁移，真正冲突仍返回 409。
+- 如果真实仓盖再次稳定关闭且固件丢失原 `eventId`，在后端已经记录闭仓的稳定阶段上报新 `box_closed`，后端也返回 200 和当前状态，但 `commands=[]` 且不会重复播放确认音；真正需要恢复状态时仍执行正常迁移，真正冲突仍返回 409。设备单纯重启不得借此伪造仓盖变化或重置对话。
 - 事件响应中的 `commands` 不直接执行；统一通过命令队列领取，避免重复执行。
 
 ## 8. 命令队列

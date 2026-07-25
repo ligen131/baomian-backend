@@ -16,6 +16,7 @@ import (
 )
 
 type VoiceConversation interface {
+	PrepareVoiceSession(ctx context.Context, userID, deviceID string) error
 	History(ctx context.Context, userID string) (dto.ConversationHistoryResponse, error)
 	Turn(ctx context.Context, userID string, request dto.ConversationTurnRequest) (dto.ConversationTurnResponse, error)
 	BeginPlayback(ctx context.Context, userID string) error
@@ -103,6 +104,9 @@ type voiceSession struct {
 }
 
 func (s *voiceSession) Ready(ctx context.Context) error {
+	if err := s.service.conversation.PrepareVoiceSession(ctx, s.userID, s.deviceID); err != nil {
+		return s.sendConversationError(ctx, err, "")
+	}
 	history, err := s.service.conversation.History(ctx, s.userID)
 	if err != nil {
 		var serviceErr *Error

@@ -18,6 +18,7 @@ type Config struct {
 	CORSAllowedOrigins             []string
 	DemoUserID                     string
 	DefaultDeviceID                string
+	DemoContinuousConversation     bool
 	AIProvider                     string
 	AnthropicAPIKey                string
 	AnthropicAuthToken             string
@@ -77,6 +78,9 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	if cfg.DemoContinuousConversation, err = strconv.ParseBool(env("DEMO_CONTINUOUS_CONVERSATION", "false")); err != nil {
+		return Config{}, fmt.Errorf("parse DEMO_CONTINUOUS_CONVERSATION: %w", err)
+	}
 	if cfg.AITimeout, err = time.ParseDuration(env("AI_TIMEOUT", "8s")); err != nil {
 		return Config{}, fmt.Errorf("parse AI_TIMEOUT: %w", err)
 	}

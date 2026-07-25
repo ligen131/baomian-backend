@@ -107,6 +107,44 @@ func TestVoiceSessionProtectsConversationDuringReplyPlayback(t *testing.T) {
 	}
 }
 
+func TestVoiceSessionReadyPreparesDemoConversationBeforeHistory(t *testing.T) {
+	conversation := &fakeVoiceConversation{phase: string(state.Locked)}
+	output := newFakeVoiceOutput()
+	service := NewVoiceSessionService(conversation, &fakeVoiceTonight{}, &fakeASRClient{}, &fakeTTSClient{}, "开场", "呼吸", 60*time.Second)
+	session := service.NewSession("user", "device", output)
+	defer session.Close()
+
+	if err := session.Ready(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	event := waitForEvent(t, output, voice.EventSessionReady, time.Second)
+	if event.Phase != string(state.Locked) || event.CompletedTurns != 0 {
+		t.Fatalf("event = %#v", event)
+	}
+	conversation.mu.Lock()
+	calls := append([]string(nil), conversation.readyLifecycle...)
+	conversation.mu.Unlock()
+	if len(calls) != 2 || calls[0] != "prepare:user:device" || calls[1] != "history" {
+		t.Fatalf("ready lifecycle = %#v", calls)
+	}
+}
+
+func TestVoiceSessionReadyMapsBlockedDemoRestart(t *testing.T) {
+	conversation := &fakeVoiceConversation{prepareErr: NewError("request_in_progress", "processing", nil)}
+	output := newFakeVoiceOutput()
+	service := NewVoiceSessionService(conversation, &fakeVoiceTonight{}, &fakeASRClient{}, &fakeTTSClient{}, "开场", "呼吸", 60*time.Second)
+	session := service.NewSession("user", "device", output)
+	defer session.Close()
+
+	if err := session.Ready(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	event := waitForEvent(t, output, voice.EventError, time.Second)
+	if event.Code != voice.ErrorTurnInProgress || !event.Retryable {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
 func TestVoiceSessionReadyReportsInconsistentPersistedState(t *testing.T) {
 	conversation := &fakeVoiceConversation{
 		historyErr: &Error{Code: "invalid_transition", Message: "今晚状态异常", Details: map[string]any{"phase": string(state.ChoosingGuidance), "completedTurns": 0}},
@@ -210,12 +248,22 @@ type fakeVoiceConversation struct {
 	requests          []dto.ConversationTurnRequest
 	responses         []dto.ConversationTurnResponse
 	playbackLifecycle []string
+	readyLifecycle    []string
+	prepareErr        error
 	historyErr        error
+}
+
+func (f *fakeVoiceConversation) PrepareVoiceSession(_ context.Context, userID, deviceID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readyLifecycle = append(f.readyLifecycle, "prepare:"+userID+":"+deviceID)
+	return f.prepareErr
 }
 
 func (f *fakeVoiceConversation) History(context.Context, string) (dto.ConversationHistoryResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.readyLifecycle = append(f.readyLifecycle, "history")
 	if f.historyErr != nil {
 		return dto.ConversationHistoryResponse{}, f.historyErr
 	}

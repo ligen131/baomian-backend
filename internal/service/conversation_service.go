@@ -18,14 +18,17 @@ import (
 )
 
 type ConversationService struct {
-	store           repository.Store
-	ai              ai.Adapter
-	hub             *realtime.Hub
-	silenceTimeout  time.Duration
-	maxDuration     time.Duration
-	processingLease time.Duration
-	logger          *slog.Logger
-	now             func() time.Time
+	store                      repository.Store
+	ai                         ai.Adapter
+	hub                        *realtime.Hub
+	silenceTimeout             time.Duration
+	maxDuration                time.Duration
+	processingLease            time.Duration
+	demoContinuousConversation bool
+	demoUserID                 string
+	demoDeviceID               string
+	logger                     *slog.Logger
+	now                        func() time.Time
 }
 
 func NewConversationService(
@@ -46,6 +49,119 @@ func NewConversationService(
 		silenceTimeout: silenceTimeout, maxDuration: maxDuration,
 		processingLease: processingLease, logger: serviceLogger, now: time.Now,
 	}
+}
+
+func (s *ConversationService) ConfigureDemoContinuousConversation(enabled bool, userID, deviceID string) {
+	s.demoContinuousConversation = enabled
+	s.demoUserID = userID
+	s.demoDeviceID = deviceID
+}
+
+func demoContinuousConversationEnabled(enabled bool, configuredUser, configuredDevice, userID, deviceID string) bool {
+	return enabled && userID == configuredUser && deviceID == configuredDevice
+}
+
+func demoConversationRestartPolicy(session *model.NightSession, now time.Time) (string, bool) {
+	if !session.BoxClosed {
+		return "", false
+	}
+	if session.Phase == string(state.Conversation) && session.ConversationTurns < 3 &&
+		session.ConversationHardDeadlineAt != nil && !now.Before(*session.ConversationHardDeadlineAt) {
+		if session.ConversationProcessingUntil != nil && now.Before(*session.ConversationProcessingUntil) {
+			return "", true
+		}
+		return "expired", false
+	}
+	if (session.Phase == string(state.ChoosingGuidance) || session.Phase == string(state.Sleeping)) && session.ConversationTurns == 3 {
+		return "completed", false
+	}
+	return "", false
+}
+
+func (s *ConversationService) PrepareVoiceSession(ctx context.Context, userID, deviceID string) error {
+	if !demoContinuousConversationEnabled(s.demoContinuousConversation, s.demoUserID, s.demoDeviceID, userID, deviceID) {
+		return nil
+	}
+
+	var response dto.TonightState
+	var sessionID, deletedCardID uuid.UUID
+	var restarted bool
+	var reason, previousPhase string
+	var previousTurns int
+	err := s.store.WithTx(ctx, func(tx repository.Store) error {
+		profile, err := tx.GetOrCreateProfile(ctx, userID)
+		if err != nil {
+			return err
+		}
+		now := s.now().UTC()
+		session, err := tx.GetOrCreateTonight(ctx, userID, profileDate(now, profile.TimeZone), true)
+		if err != nil {
+			return err
+		}
+		reason, blocked := demoConversationRestartPolicy(session, now)
+		if blocked {
+			return NewError("request_in_progress", "上一轮倾诉正在处理中", nil)
+		}
+		if reason == "" {
+			return nil
+		}
+		sessionID = session.ID
+		previousPhase = session.Phase
+		previousTurns = session.ConversationTurns
+		if err := tx.DeleteConversationTurns(ctx, session.ID); err != nil {
+			return err
+		}
+		if card, err := tx.GetMemoryCardBySession(ctx, session.ID); err == nil {
+			deletedCardID = card.ID
+		} else if !errors.Is(err, repository.ErrNotFound) {
+			return err
+		}
+		if err := tx.DeleteMemoryCardBySession(ctx, session.ID); err != nil {
+			return err
+		}
+		if err := tx.DeleteOpenDeviceCommands(ctx, userID, deviceID); err != nil {
+			return err
+		}
+		resetDemoConversation(session)
+		if err := tx.UpdateNightSession(ctx, session); err != nil {
+			return err
+		}
+		response = dto.TonightFromModels(session, profile)
+		restarted = true
+		return nil
+	})
+	if err != nil {
+		return normalizeServiceError(err, "准备演示语音会话失败")
+	}
+	if !restarted {
+		return nil
+	}
+	if s.logger != nil {
+		s.logger.InfoContext(ctx, "demo conversation restarted", "sessionId", sessionID, "userId", userID, "deviceId", deviceID, "restartReason", reason, "previousPhase", previousPhase, "previousCompletedTurns", previousTurns)
+	}
+	if deletedCardID != uuid.Nil {
+		publish(s.hub, userID, "journal.deleted", map[string]any{"id": deletedCardID})
+	}
+	publish(s.hub, userID, "tonight.updated", response)
+	return nil
+}
+
+func resetDemoConversation(session *model.NightSession) {
+	session.Phase = string(state.Locked)
+	session.ResumePhase = ""
+	session.ConversationTurns = 0
+	session.SelectedGuidance = ""
+	session.AudioPlaying = false
+	session.SunriseProgress = 0
+	session.PausedForTonight = false
+	session.LatestAIDraft = model.JSON(map[string]any{})
+	session.FinalizeReason = ""
+	session.ConversationStartedAt = nil
+	session.ConversationLastActivityAt = nil
+	clearConversationTiming(session)
+	session.PhoneRemovedAt = nil
+	session.ResumeDeadlineAt = nil
+	session.AudioEndsAt = nil
 }
 
 func (s *ConversationService) History(ctx context.Context, userID string) (dto.ConversationHistoryResponse, error) {
