@@ -115,9 +115,12 @@ func (h *DeviceVoiceController) Connect(c *gin.Context) {
 		case websocket.TextMessage:
 			event, decodeErr := voice.DecodeClientEvent(payload)
 			if decodeErr != nil {
+				if h.logger != nil {
+					h.logger.Warn("device voice control event rejected", "deviceId", deviceID, "stage", "decode", "errorCategory", "invalid_event", "reason", decodeErr.Error())
+				}
 				_ = output.SendEvent(connectionContext, voice.ServerEvent{
 					Type: voice.EventError, Code: voice.ErrorInvalidEvent,
-					Message: "语音控制事件无效", Retryable: false,
+					Message: decodeErr.Error(), Retryable: false,
 				})
 				continue
 			}

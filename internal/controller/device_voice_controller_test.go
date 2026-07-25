@@ -143,6 +143,51 @@ func TestDeviceVoiceControllerDeliversPlaybackEndAfterBurstPCM(t *testing.T) {
 	}
 }
 
+func TestDeviceVoiceControllerExplainsMissingRunIDAndKeepsConnectionOpen(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.GET("/voice", NewDeviceVoiceController(fakeVoiceSessionFactory{}, true, "user-1").Connect)
+	server := httptest.NewServer(engine)
+	defer server.Close()
+
+	connection, _, err := websocket.DefaultDialer.Dial(websocketTestURLForController(server.URL)+"/voice?deviceId=device-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	var ready voice.ServerEvent
+	if err := connection.ReadJSON(&ready); err != nil {
+		t.Fatal(err)
+	}
+	if ready.RunID != "run-1" {
+		t.Fatalf("ready = %#v", ready)
+	}
+	if err := connection.WriteJSON(map[string]string{"type": voice.EventSessionStart, "eventId": "start-1"}); err != nil {
+		t.Fatal(err)
+	}
+	var invalid voice.ServerEvent
+	if err := connection.ReadJSON(&invalid); err != nil {
+		t.Fatal(err)
+	}
+	if invalid.Type != voice.EventError || invalid.Code != voice.ErrorInvalidEvent || invalid.RunID != "run-1" || !strings.Contains(invalid.Message, "runId is required") {
+		t.Fatalf("invalid = %#v", invalid)
+	}
+	if invalid.Retryable || invalid.TerminalFor != "event" || invalid.OccurredAt == "" {
+		t.Fatalf("invalid terminal metadata = %#v", invalid)
+	}
+
+	if err := connection.WriteJSON(voice.ClientEvent{Type: voice.EventSessionStart, RunID: "run-1", EventID: "start-2"}); err != nil {
+		t.Fatal(err)
+	}
+	var started voice.ServerEvent
+	if err := connection.ReadJSON(&started); err != nil {
+		t.Fatal(err)
+	}
+	if started.Type != voice.EventPlaybackStart {
+		t.Fatalf("started = %#v", started)
+	}
+}
+
 func TestDeviceVoiceControllerWebSocketSmoke(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
@@ -241,7 +286,7 @@ type fakeControllerVoiceSession struct {
 
 func (s *fakeControllerVoiceSession) Ready(ctx context.Context) error {
 	return s.output.SendEvent(ctx, voice.ServerEvent{
-		Type: voice.EventSessionReady, Phase: "LOCKED", CompletedTurns: 0,
+		Type: voice.EventSessionReady, RunID: "run-1", Phase: "LOCKED", CompletedTurns: 0,
 		Audio: voice.DefaultAudioFormat(),
 	})
 }
