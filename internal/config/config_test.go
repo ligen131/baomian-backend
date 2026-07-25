@@ -96,7 +96,7 @@ func TestLoadVolcengineSpeechDefaults(t *testing.T) {
 	if cfg.VolcengineTTSResourceID != "seed-tts-2.0" {
 		t.Fatal(cfg.VolcengineTTSResourceID)
 	}
-	if cfg.VolcengineTTSSpeaker != "zh_female_gaolengyujie_uranus_bigtts" {
+	if cfg.VolcengineTTSSpeaker != "ICL_uranus_zh_female_wenrouwenya_tob" {
 		t.Fatal(cfg.VolcengineTTSSpeaker)
 	}
 	if cfg.VolcengineASRTimeout != 20*time.Second || cfg.VolcengineASRFinalTimeout != 8*time.Second || cfg.VoiceMaxUtteranceDuration != 60*time.Second {

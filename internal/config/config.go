@@ -74,7 +74,7 @@ func Load() (Config, error) {
 		VolcengineASRResourceID:     env("VOLCENGINE_ASR_RESOURCE_ID", "volc.bigasr.sauc.duration"),
 		VolcengineTTSWSURL:          env("VOLCENGINE_TTS_WS_URL", "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"),
 		VolcengineTTSResourceID:     env("VOLCENGINE_TTS_RESOURCE_ID", "seed-tts-2.0"),
-		VolcengineTTSSpeaker:        env("VOLCENGINE_TTS_SPEAKER", "zh_female_gaolengyujie_uranus_bigtts"),
+		VolcengineTTSSpeaker:        env("VOLCENGINE_TTS_SPEAKER", "ICL_uranus_zh_female_wenrouwenya_tob"),
 		VoiceOpeningText:            env("VOICE_OPENING_TEXT", "手机已经安放好了。今晚有什么想和眠眠说的吗？"),
 		VoiceBreathingScript:        env("VOICE_BREATHING_SCRIPT", "跟着眠眠，慢慢吸气四秒，再轻轻呼气六秒。"),
 		DemoRainAudioPath:           strings.TrimSpace(os.Getenv("DEMO_RAIN_AUDIO_PATH")),
