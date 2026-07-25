@@ -79,10 +79,14 @@ func TestLoadVolcengineSpeechDefaults(t *testing.T) {
 	t.Setenv("VOLCENGINE_SPEECH_APP_ID", "")
 	t.Setenv("VOLCENGINE_SPEECH_ACCESS_TOKEN", "")
 	t.Setenv("VOLCENGINE_TTS_API_KEY", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.AnthropicModel != "deepseek-v4-flash" {
+		t.Fatalf("AnthropicModel = %q", cfg.AnthropicModel)
 	}
 	if cfg.VolcengineASRWSURL != "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async" {
 		t.Fatal(cfg.VolcengineASRWSURL)
@@ -163,14 +167,22 @@ func TestLoadRejectsInvalidVolcengineURL(t *testing.T) {
 func TestLoadAIProvider(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://example/app")
 
-	t.Run("default anthropic", func(t *testing.T) {
+	t.Run("default deepseek proxy", func(t *testing.T) {
 		t.Setenv("AI_PROVIDER", "")
+		t.Setenv("ANTHROPIC_BASE_URL", "")
+		t.Setenv("ANTHROPIC_MODEL", "")
 		cfg, err := Load()
 		if err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
-		if cfg.AIProvider != "anthropic" {
+		if cfg.AIProvider != "openai_compatible" {
 			t.Fatalf("AIProvider = %q", cfg.AIProvider)
+		}
+		if cfg.AnthropicBaseURL != "http://127.0.0.1:38109" {
+			t.Fatalf("AnthropicBaseURL = %q", cfg.AnthropicBaseURL)
+		}
+		if cfg.AnthropicModel != "deepseek-v4-flash" {
+			t.Fatalf("AnthropicModel = %q", cfg.AnthropicModel)
 		}
 	})
 

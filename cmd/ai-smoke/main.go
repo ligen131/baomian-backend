@@ -14,7 +14,7 @@ func main() {
 	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
 	model := os.Getenv("ANTHROPIC_MODEL")
 	if model == "" {
-		model = "claude-opus-4-8"
+		model = "deepseek-v4-flash"
 	}
 	adapter := ai.NewOpenAICompatibleAdapter(
 		os.Getenv("ANTHROPIC_API_KEY"),

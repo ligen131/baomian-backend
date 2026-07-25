@@ -1,6 +1,6 @@
 # 抱眠 MVP 后端
 
-抱眠 P0+P1 演示后端，提供 Android 状态接口、T5 双向流式语音、火山引擎 ASR/TTS、Anthropic Claude、状态机、后台计时协调器与 PostgreSQL 持久化能力。本仓库不包含 Android 或 T5 固件代码。
+抱眠 P0+P1 演示后端，提供 Android 状态接口、T5 双向流式语音、火山引擎 ASR/TTS、DeepSeek 对话、状态机、后台计时协调器与 PostgreSQL 持久化能力。本仓库不包含 Android 或 T5 固件代码。
 
 > 连续演示契约：RESET 幂等创建 conversation run，T5 本地 VAD 自动录音，不限轮连续对话；KEY 幂等结束 run、append 晚安日记并流式播放睡眠素材。前端可独立调用 `POST /api/v1/tts/stream`。权威 Voice 消息定义见 [`api/device-voice.schema.json`](api/device-voice.schema.json)。
 
@@ -21,7 +21,7 @@
 - 今晚状态机：`WAITING_TO_LOCK → LOCKED → CONVERSATION → CHOOSING_GUIDANCE → SLEEPING → SUNRISE → AWAKE`
 - 开仓异常状态 `PHONE_REMOVED` 及闭仓恢复
 - RESET 创建独立 conversation run；睡前倾诉不限轮，只有 KEY 发出的 `conversation.finish` 才生成晚安日记并进入引导
-- Claude 主适配器 + 本地 `FallbackAdapter` + 高风险固定提示
+- DeepSeek 主模型 + 本地 `FallbackAdapter` + 高风险固定提示；保留 Anthropic adapter 作为可选协议路径
 - T5 设备事件幂等、设备命令长轮询和 ACK
 - 按 Demo 用户分组的 WebSocket 广播
 - PostgreSQL 行锁与事务边界
@@ -30,7 +30,7 @@
 
 - Profile IANA 时区、提醒开关和“今晚跳过提醒”；提醒和闹钟由 Android 本地调度。
 - conversation run、`runId + clientRequestId` 幂等、结构化断线恢复和同日多篇晚安日记。
-- T5 通过独立 Voice WebSocket 流式上行 PCM；后端桥接火山引擎 ASR、Claude 连续对话和火山引擎 TTS，再向 T5 流式下发 PCM。
+- T5 通过独立 Voice WebSocket 流式上行 PCM；后端桥接火山引擎 ASR、DeepSeek 连续对话和火山引擎 TTS，再向 T5 流式下发 PCM。
 - Android 只负责设置、状态、设备在线和晚安日记；正式路径不录音、不 STT、不 TTS。
 - 后端不持久化原始音频；开仓后有 10 分钟恢复窗口，白噪音按 10/20/30 分钟自动停止。
 - 晚安卡详情、明日待办完成/取消、历史单卡与对应对话删除。
@@ -56,11 +56,11 @@ cp .env.example .env
 | `DEMO_USER_ID` | `expo-user-001` | 默认演示用户 |
 | `DEFAULT_DEVICE_ID` | `expo-device-001` | APP action 对应的默认设备 |
 | `DEMO_CONTINUOUS_CONVERSATION` | `false` | 仅对上述固定演示用户和设备生效；RESET `box_closed(source=reset_button)` 创建新 run并重置为 `LOCKED + 0` |
-| `AI_PROVIDER` | `anthropic` | AI 协议：`anthropic` 或 `openai_compatible` |
+| `AI_PROVIDER` | `openai_compatible` | AI 协议：`openai_compatible` 或 `anthropic`；默认通过本机代理请求 DeepSeek |
 | `ANTHROPIC_API_KEY` | 空 | API Key；与 Auth Token 均为空时自动走本地 fallback |
 | `ANTHROPIC_AUTH_TOKEN` | 空 | Bearer Auth Token；与 API Key 同时设置时优先使用此项 |
-| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | AI 服务根地址；变量名为兼容旧配置而保留 |
-| `ANTHROPIC_MODEL` | `claude-opus-4-8` | Claude 模型 |
+| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:38109` | AI 服务根地址；变量名为兼容旧配置而保留 |
+| `ANTHROPIC_MODEL` | `deepseek-v4-flash` | OpenAI-compatible 代理请求模型；Anthropic 模式需显式改为 Claude 模型 |
 | `AI_TIMEOUT` | `8s` | AI 总体超时；主模型会预留约 500ms 给 fallback |
 | `VOLCENGINE_SPEECH_APP_ID` | 空 | 火山引擎 ASR 应用 App ID |
 | `VOLCENGINE_SPEECH_ACCESS_TOKEN` | 空 | 火山引擎 ASR Access Token |
@@ -84,7 +84,7 @@ cp .env.example .env
 | `DEVICE_COMMAND_MAX_ATTEMPTS` | `5` | 最大投递次数 |
 | `EXPO_TIME_SCALE` | `1` | Demo 计时加速比例；生产保持 1 |
 
-Claude 和火山引擎凭证只从环境变量读取，不会写入数据库或业务日志。请仅将上游 URL 指向受信任的服务，因为认证凭证会随请求发送到该地址。火山引擎 ASR App ID、ASR Access Token 或 TTS API Key 任一为空时，REST/Android 状态功能仍可用，但 T5 Voice WebSocket 会在 upgrade 前返回 503。Secret Key 不用于这两条语音 WebSocket API。
+AI 代理和火山引擎凭证只从环境变量读取，不会写入数据库或业务日志。请仅将上游 URL 指向受信任的服务，因为认证凭证会随请求发送到该地址。火山引擎 ASR App ID、ASR Access Token 或 TTS API Key 任一为空时，REST/Android 状态功能仍可用，但 T5 Voice WebSocket 会在 upgrade 前返回 503。Secret Key 不用于这两条语音 WebSocket API。
 
 ### 2. 使用 Docker Compose
 
@@ -140,7 +140,7 @@ make reset-test-session USER_ID=expo-user-001 DEVICE_ID=expo-device-001
 
 脚本只删除指定测试身份当天的 NightSession（对话与记忆卡由外键级联删除）以及当天未完成的设备命令；保留 Profile、Device、历史日期、已完成命令和 DeviceEvent 审计。它仅供服务器本机联调，不开放公网 API，也不属于正式用户功能。
 
-## Claude 与降级策略
+## AI 模型与降级策略
 
 调用链：
 
@@ -154,9 +154,8 @@ SafetyAdapter
 
 `AnthropicAdapter` 使用官方 Go SDK 调用 `POST /v1/messages`；`OpenAICompatibleAdapter` 专门调用 CLI Proxy 的 `POST /v1/chat/completions`。两者不会根据 URL 隐式猜测协议，由 `AI_PROVIDER` 明确选择：
 
-- 直连 Anthropic：`AI_PROVIDER=anthropic`
-- 当前 CLI Proxy：`AI_PROVIDER=openai_compatible`
-- 默认模型 `claude-opus-4-8`
+- 当前默认 CLI Proxy：`AI_PROVIDER=openai_compatible`，模型 `deepseek-v4-flash`
+- 直连 Anthropic：显式设置 `AI_PROVIDER=anthropic`、Anthropic Base URL 和对应 Claude 模型
 - Anthropic 路径使用 adaptive thinking + `low` effort + `output_config.format`
 - CLI Proxy 路径使用 `response_format.type=json_schema` 与相同 JSON Schema
 - 不发送 `temperature`、`top_p` 或 `top_k`
@@ -170,7 +169,7 @@ CLI Proxy 示例：
 AI_PROVIDER=openai_compatible
 ANTHROPIC_BASE_URL=http://127.0.0.1:38109
 ANTHROPIC_AUTH_TOKEN=<仅存放在 .env 或秘密管理系统中>
-ANTHROPIC_MODEL=claude-opus-4-8
+ANTHROPIC_MODEL=deepseek-v4-flash
 ```
 
 凭证只写入 `Authorization: Bearer` 请求头，不会进入请求 JSON、业务日志或错误日志。`ANTHROPIC_BASE_URL` 必须指向可信服务。
@@ -258,7 +257,7 @@ T5 使用独立语音连接：
 ws://localhost:8080/api/v1/device/voice?deviceId=expo-device-001&userId=expo-user-001
 ```
 
-控制消息是 JSON text message；音频是 PCM signed 16-bit little-endian、24000 Hz、mono、20 ms、960-byte binary message。后端将 10 个 T5 帧聚合成约 200 ms 后发送给火山引擎 ASR；火山引擎 TTS 返回的 24 kHz PCM 会重新切成 960-byte 帧下发 T5。Claude 仍由现有 `ConversationService` 调用。`VoiceSessionService` 是确定性的 Go 协调器，不是 AI Agent。完整协议见 [`docs/hardware-integration.md`](docs/hardware-integration.md) 和 [`docs/voice-streaming-design.md`](docs/voice-streaming-design.md)。
+控制消息是 JSON text message；音频是 PCM signed 16-bit little-endian、24000 Hz、mono、20 ms、960-byte binary message。后端将 10 个 T5 帧聚合成约 200 ms 后发送给火山引擎 ASR；火山引擎 TTS 返回的 24 kHz PCM 会重新切成 960-byte 帧下发 T5。DeepSeek 仍由现有 `ConversationService` 通过 OpenAI-compatible adapter 调用。`VoiceSessionService` 是确定性的 Go 协调器，不是 AI Agent。完整协议见 [`docs/hardware-integration.md`](docs/hardware-integration.md) 和 [`docs/voice-streaming-design.md`](docs/voice-streaming-design.md)。
 
 生产模式下，设备启动只上报 heartbeat。固定演示环境可显式开启 `DEMO_CONTINUOUS_CONVERSATION=true`：只有 `DEMO_USER_ID + DEFAULT_DEVICE_ID` 精确匹配且上报 `box_closed`、`payload.source=reset_button` 时，后端才幂等创建新 run、abort 旧活动 run 并重置 NightSession 为 `LOCKED + 0`。新 run 不删除旧 turn 或日记；对话可持续任意轮，直到 KEY 发送 `conversation.finish`。
 
@@ -294,7 +293,7 @@ go test ./...
 go build ./...
 ```
 
-AI 与火山引擎语音 adapter 测试使用本地 `httptest.Server`/mock WebSocket，不会请求真实 Claude 或火山引擎，也不依赖真实凭证。PostgreSQL 集成闭环：
+AI 与火山引擎语音 adapter 测试使用本地 `httptest.Server`/mock WebSocket，不会请求真实 DeepSeek、Claude 或火山引擎，也不依赖真实凭证。PostgreSQL 集成闭环：
 
 ```bash
 docker compose up --build -d

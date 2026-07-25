@@ -13,7 +13,7 @@ import (
 
 func TestOpenAICompatibleAdapterGenerate(t *testing.T) {
 	server := newOpenAICompatibleTestServer(t, func(t *testing.T, request map[string]any) {
-		if request["model"] != "claude-opus-4-8" {
+		if request["model"] != "deepseek-v4-flash" {
 			t.Fatalf("model = %v", request["model"])
 		}
 		if _, exists := request["temperature"]; exists {
@@ -41,7 +41,7 @@ func TestOpenAICompatibleAdapterGenerate(t *testing.T) {
 	})
 	defer server.Close()
 
-	adapter := NewOpenAICompatibleAdapter("", "test-token", server.URL, "claude-opus-4-8", server.Client())
+	adapter := NewOpenAICompatibleAdapter("", "test-token", server.URL, "deepseek-v4-flash", server.Client())
 	result, err := adapter.Generate(context.Background(), Request{Persona: "gentle", TurnIndex: 1, Text: "明天要汇报，有点紧张"})
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
@@ -71,7 +71,7 @@ func TestOpenAICompatibleAdapterUsesJournalPromptForJournalMode(t *testing.T) {
 	})
 	defer server.Close()
 
-	adapter := NewOpenAICompatibleAdapter("", "test-token", server.URL, "claude-opus-4-8", server.Client())
+	adapter := NewOpenAICompatibleAdapter("", "test-token", server.URL, "deepseek-v4-flash", server.Client())
 	if _, err := adapter.Generate(context.Background(), Request{Mode: ModeJournal, Turns: []Turn{{Role: "user", Text: "今天有点累"}}}); err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestOpenAICompatibleAdapterUsesJournalPromptForJournalMode(t *testing.T) {
 func TestOpenAICompatibleAdapterBaseURLWithV1(t *testing.T) {
 	server := newOpenAICompatibleTestServer(t, nil)
 	defer server.Close()
-	adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL+"/v1", "claude-opus-4-8", server.Client())
+	adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL+"/v1", "deepseek-v4-flash", server.Client())
 	if _, err := adapter.Generate(context.Background(), Request{TurnIndex: 1, Text: "测试"}); err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
@@ -89,7 +89,7 @@ func TestOpenAICompatibleAdapterBaseURLWithV1(t *testing.T) {
 func TestOpenAICompatibleAdapterDoesNotForceThirdTurnFinalize(t *testing.T) {
 	server := newOpenAICompatibleTestServer(t, nil)
 	defer server.Close()
-	adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL, "claude-opus-4-8", server.Client())
+	adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL, "deepseek-v4-flash", server.Client())
 	result, err := adapter.Generate(context.Background(), Request{Mode: ModeReply, TurnIndex: 3, Text: "还是有点担心"})
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
@@ -111,7 +111,7 @@ func TestOpenAICompatibleAdapterRejectsInvalidResponses(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := openAICompatibleResponseServer(t, http.StatusOK, chatCompletionEnvelope(test.content))
 			defer server.Close()
-			adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL, "claude-opus-4-8", server.Client())
+			adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL, "deepseek-v4-flash", server.Client())
 			_, err := adapter.Generate(context.Background(), Request{TurnIndex: 1, Text: "测试"})
 			if !errors.Is(err, ErrInvalidResponse) {
 				t.Fatalf("error = %v, want ErrInvalidResponse", err)
@@ -124,7 +124,7 @@ func TestOpenAICompatibleAdapterRejectsHTTPErrorRefusalAndMissingCredential(t *t
 	t.Run("http error", func(t *testing.T) {
 		server := openAICompatibleResponseServer(t, http.StatusNotFound, `{"error":{"message":"not found"}}`)
 		defer server.Close()
-		adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL, "claude-opus-4-8", server.Client())
+		adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL, "deepseek-v4-flash", server.Client())
 		if _, err := adapter.Generate(context.Background(), Request{Text: "测试"}); err == nil {
 			t.Fatal("Generate() error = nil, want HTTP error")
 		}
@@ -133,14 +133,14 @@ func TestOpenAICompatibleAdapterRejectsHTTPErrorRefusalAndMissingCredential(t *t
 	t.Run("refusal", func(t *testing.T) {
 		server := openAICompatibleResponseServer(t, http.StatusOK, `{"choices":[{"message":{"content":"","refusal":"declined"},"finish_reason":"stop"}]}`)
 		defer server.Close()
-		adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL, "claude-opus-4-8", server.Client())
+		adapter := NewOpenAICompatibleAdapter("test-key", "", server.URL, "deepseek-v4-flash", server.Client())
 		if _, err := adapter.Generate(context.Background(), Request{Text: "测试"}); err == nil {
 			t.Fatal("Generate() error = nil, want refusal error")
 		}
 	})
 
 	t.Run("missing credential", func(t *testing.T) {
-		adapter := NewOpenAICompatibleAdapter("", "", "https://example.invalid", "claude-opus-4-8", nil)
+		adapter := NewOpenAICompatibleAdapter("", "", "https://example.invalid", "deepseek-v4-flash", nil)
 		if _, err := adapter.Generate(context.Background(), Request{Text: "测试"}); err == nil {
 			t.Fatal("Generate() error = nil, want missing credential error")
 		}
@@ -186,5 +186,5 @@ func openAICompatibleResponseServer(t *testing.T, status int, body string) *http
 
 func chatCompletionEnvelope(content string) string {
 	encoded, _ := json.Marshal(content)
-	return `{"id":"chatcmpl-test","object":"chat.completion","model":"claude-opus-4-8","choices":[{"index":0,"message":{"role":"assistant","content":` + string(encoded) + `},"finish_reason":"stop"}]}`
+	return `{"id":"chatcmpl-test","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":` + string(encoded) + `},"finish_reason":"stop"}]}`
 }
